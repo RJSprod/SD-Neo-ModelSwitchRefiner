@@ -30,6 +30,7 @@ It prints one JSON object and exits 0 only when every check held.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import sys
 import tempfile
@@ -439,6 +440,39 @@ def main() -> int:
                                    "after": page.evaluate(WHERE, "#mc-llm-chat-emotion")}
             held["emotion label"] = page.evaluate(LABEL, "mc-llm-chat-emotion")
             found["held"] = held
+
+            # How full the context is (mc_llm_window): quiet numbers at the end
+            # of the status line, which a press turns into the pop-up open at
+            # its Context section; Trim there says what it kept.
+            meter = "#mc-llm-chat-status .mc-llm-context-shown"
+            page.click("#mc-llm-chat-conversation .mc-llm-sheet-back")
+            page.wait_for_function(f"!({OPEN})()", timeout=10000)
+            page.wait_for_selector(meter, state="visible", timeout=10000)
+            context = {"meter": page.evaluate(f"() => document.querySelector('{meter}').textContent"),
+                       "inside the line": page.evaluate(f"""() => {{
+                           const line = document.querySelector('#mc-llm-chat-status').getBoundingClientRect();
+                           const m = document.querySelector('{meter}').getBoundingClientRect();
+                           return m.top >= line.top - 1 && m.bottom <= line.bottom + 1
+                               && m.right <= line.right + 1 && m.right > line.right - 40; }}""")}
+            page.click(meter)
+            page.wait_for_function(OPEN, timeout=10000)
+            page.wait_for_selector("#mc-llm-chat-context-section .label-wrap.open", timeout=10000)
+            context["section open"] = True
+            context["label"] = page.evaluate(LABEL, "mc-llm-chat-context-section")
+            keep = "#mc-llm-chat-context-keep input[type=number]"
+            page.click(keep)
+            page.keyboard.press("Control+A")
+            page.keyboard.type("0")
+            page.evaluate("() => document.activeElement && document.activeElement.blur()")
+            page.click("#mc-llm-chat-context-trim")
+            page.wait_for_function("""() => (document.querySelector('#mc-llm-chat-status')
+                .textContent || '').includes('Sending the latest')""", timeout=10000)
+            context["trimmed"] = page.evaluate("""() => document.querySelector(
+                '#mc-llm-chat-status .mc-llm-notice').textContent""")
+            page.wait_for_timeout(900)
+            context["meter after"] = page.evaluate(
+                f"() => (document.querySelector('{meter}') || {{}}).textContent || null")
+            found["context"] = context
             browser.close()
     finally:
         demo.close()
@@ -513,6 +547,16 @@ def main() -> int:
             found.get("held", {}).get("emotion row", {}).get("below the fold") is True
             and _same(found.get("held", {}).get("emotion row"), scrolled=False)
             and (found.get("held", {}).get("emotion label") or "").startswith("Emotion · *")),
+        "the context meter is at the end of the status line": (
+            bool(re.fullmatch(r"≈?[\d,]+ / [\d,]+", found.get("context", {}).get("meter") or ""))
+            and found.get("context", {}).get("inside the line") is True),
+        "a press on the meter opens the pop-up at its Context section": (
+            found.get("context", {}).get("section open") is True
+            and (found.get("context", {}).get("label") or "").startswith("Context · ")),
+        "Trim says what it kept, and the meter is drawn again": (
+            (found.get("context", {}).get("trimmed") or "").startswith("Sending the latest 2 of")
+            and bool(re.fullmatch(r"≈?[\d,]+ / [\d,]+",
+                                  found.get("context", {}).get("meter after") or ""))),
         "no script errors": not errors,
     }
     print(json.dumps({"checks": checks, "found": found, "errors": errors, "made": made}, indent=1))

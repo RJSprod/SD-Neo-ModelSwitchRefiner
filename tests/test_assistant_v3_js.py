@@ -945,12 +945,13 @@ class TestTheMenuOpensTheEditor:
     shell.store = {snapshot: () => ({selection: {character: "Ada", thread: "t1"}})};
     """
 
-    def test_it_is_in_the_chat_group_after_new_chat_threads_and_emotion(self):
+    def test_it_is_in_the_chat_group_after_new_chat_threads_emotion_and_context(self):
         found = run(self.MENU + """
             console.log(JSON.stringify(shell.utilityItems().map((item) => item.textContent)));
         """, sources=("shell", "system"))
 
-        assert found[:5] == ["Chat · Ada", "New chat", "Threads", "Emotion", "System prompt…"]
+        assert found[:6] == ["Chat · Ada", "New chat", "Threads", "Emotion", "Context",
+                             "System prompt…"]
 
     def test_pressing_it_puts_the_menu_away_and_opens_the_character(self):
         found = run(self.MENU + """

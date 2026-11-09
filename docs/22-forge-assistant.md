@@ -4811,3 +4811,41 @@ nothing to follow, and does not wake the tab's last turn; subscribers hear the
 speaker start and stop. `tests/test_voice_turn.py`: the drop is said at INFO with
 no word of the reply. Twenty-three mutations across the change (docs/16 lists the
 speaker's) each fail a test. Not run on the user's machine.
+
+## 3.54 How full the context is, and the Context submenu (2026-11-09)
+
+> "I want the ability to see how full my context window is, make it something
+> subtle, like where the status message is."
+
+The thread's context window is the server's (`mc_llm_window`, `mc_llm_compact`;
+docs/07 §50, the README's *The context window*). The panel shows it and acts on
+it:
+
+- **The meter.** The status line is now `div.forge-assistant-statusline` -- the
+  status paragraph (`nodes.status`, unchanged) and after it a quiet button
+  (`nodes.context`, `.forge-assistant-context`): *4,401 / 8,192* from the
+  snapshot's `context`, *≈* in front for an estimate, `data-state` ok / near /
+  full / compacting for its colour (`renderContext`, written only when it
+  changed, hidden with no thread or while the panel is suppressed). A press opens
+  the ⋯ menu a level down at Context (`openContext`).
+- **The submenu** (`contextItem` after Emotion in the Chat group, `contextItems`):
+  the reading in a sentence, *Keep the latest* and *Summary length* as range
+  inputs (the server's ranges), Trim / Compact / Clear (`contextAction` →
+  `store.setWindow`, `compact`, `clearWindow`), the summary if there is one; while
+  the thread is compacted, its progress and *Cancel compacting* alone. The answer
+  is said on the status line (`tell`) and the snapshot read again.
+- **While compacting** the status line says *Summarizing… N characters* (or what
+  it waits for) quietly, before *Updating cache…*; how it ended is told once
+  when it ends. The store sends the four commands against no revision, holds its
+  feed open while the open thread is compacted (`compacting`, `needsFeed`), and
+  applies the feed's `context` events to the snapshot, reading the thread again
+  at the end.
+
+**Verified.** `tests/test_assistant_context_js.py` (node, the real shell and
+store): the meter's numbers, estimate mark, colours and silence, written only
+when it changed, the end told once, the press opening the submenu; the entry
+after Emotion; the submenu's reading, ranges, actions, summary and its
+compacting state; each action's call and what it says; the status line while
+compacting; the store's four envelopes, its feed held and the events applied.
+Four older menu tests gained the entry. Drawn in Chromium on the layout test
+page. Eight of docs/07 §50's mutations are in these files.

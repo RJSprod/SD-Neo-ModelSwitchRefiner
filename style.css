@@ -3422,6 +3422,69 @@
     padding: 0.15em 0.5em;
 }
 
+/* How full the thread's context is (mc_llm_window): quiet numbers at the right
+   end of the status line, "4,401 / 8,192", put there by javascript/llm_studio.js
+   from the hidden box Python draws. Coloured only as the window nears the point
+   where its oldest messages leave by themselves, and pulsing while the thread
+   is being compacted. A press opens the Context section. */
+#mc-llm-studio .mc-llm-chat-status {
+    position: relative;
+}
+
+#mc-llm-studio .mc-llm-chat-status:has(> .mc-llm-context-shown) .mc-llm-notice {
+    padding-right: 9.5em;
+}
+
+#mc-llm-studio .mc-llm-chat-status > .mc-llm-context-shown {
+    background: none;
+    border: 0;
+    color: var(--body-text-color-subdued, inherit);
+    cursor: pointer;
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    line-height: inherit;
+    margin: 0;
+    min-width: 0 !important;
+    opacity: 0.7;
+    padding: 0.15em 0.5em;
+    position: absolute;
+    right: 0;
+    top: 0;
+    white-space: nowrap;
+}
+
+#mc-llm-studio .mc-llm-chat-status > .mc-llm-context-shown:hover,
+#mc-llm-studio .mc-llm-chat-status > .mc-llm-context-shown:focus-visible {
+    opacity: 1;
+    text-decoration: underline;
+}
+
+#mc-llm-studio .mc-llm-chat-status > .mc-llm-context-shown[data-state="near"] {
+    color: var(--color-accent, inherit);
+    opacity: 0.9;
+}
+
+#mc-llm-studio .mc-llm-chat-status > .mc-llm-context-shown[data-state="full"] {
+    color: var(--error-text-color, var(--color-accent, inherit));
+    opacity: 1;
+}
+
+#mc-llm-studio .mc-llm-chat-status > .mc-llm-context-shown[data-state="compacting"] {
+    animation: mc-llm-updating-pulse 1.6s ease-in-out infinite;
+    color: var(--color-accent, inherit);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #mc-llm-studio .mc-llm-chat-status > .mc-llm-context-shown[data-state="compacting"] {
+        animation: none;
+    }
+}
+
+#mc-llm-studio .mc-llm-context-actions {
+    flex-wrap: wrap;
+    gap: 0.5em;
+}
+
 /* Quiet by default. "Ready." is not news; a warning and an error keep the
    weight and the colour the notice rules give them. */
 #mc-llm-studio .mc-llm-chat-status .mc-llm-notice-info {
@@ -9474,10 +9537,142 @@
     text-align: center;
 }
 
+/* The status line, and at its right end how full the thread's context is
+   (mc_llm_window): quiet numbers, "4,401 / 8,192", coloured only as the window
+   nears the point where its oldest messages leave by themselves, pulsing while
+   the thread is compacted. A press opens the ⋯ menu's Context submenu. */
+.forge-assistant-statusline {
+    align-items: baseline;
+    display: flex;
+    gap: 0.5em;
+    min-width: 0;
+}
+
+.forge-assistant-statusline > .forge-assistant-status {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
 .forge-assistant-status {
     margin: 0;
     font-size: 0.85em;
     opacity: 0.85;
+}
+
+.forge-assistant-context {
+    background: none;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    flex: 0 0 auto;
+    font: inherit;
+    font-size: 0.8em;
+    font-variant-numeric: tabular-nums;
+    margin: 0;
+    min-width: 0 !important;
+    opacity: 0.6;
+    padding: 0;
+    white-space: nowrap;
+}
+
+.forge-assistant-context:hover,
+.forge-assistant-context:focus-visible {
+    opacity: 1;
+    text-decoration: underline;
+}
+
+.forge-assistant-context[data-state="near"] {
+    color: var(--color-accent, #b45309);
+    opacity: 0.9;
+}
+
+.forge-assistant-context[data-state="full"] {
+    color: var(--error-text-color, var(--color-accent, #b91c1c));
+    opacity: 1;
+}
+
+.forge-assistant-context[data-state="compacting"] {
+    animation: forge-assistant-updating 1.6s ease-in-out infinite;
+    color: var(--color-accent, #2563eb);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .forge-assistant-context[data-state="compacting"] {
+        animation: none;
+    }
+}
+
+/* The Context submenu. */
+.forge-assistant-context-value {
+    font-size: 0.85em;
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+    opacity: 0.7;
+    white-space: nowrap;
+}
+
+.forge-assistant-context-note {
+    font-size: 0.85em;
+    margin: 0.3em 0.6em;
+    opacity: 0.85;
+}
+
+.forge-assistant-context-range {
+    display: flex;
+    flex-direction: column;
+    font-size: 0.85em;
+    gap: 0.2em;
+    margin: 0.4em 0.6em;
+}
+
+.forge-assistant-context-range-head {
+    display: flex;
+    gap: 0.5em;
+    justify-content: space-between;
+}
+
+.forge-assistant-context-readout {
+    font-variant-numeric: tabular-nums;
+    opacity: 0.8;
+}
+
+.forge-assistant-context-slider {
+    accent-color: var(--color-accent, #2563eb);
+    margin: 0;
+    width: 100%;
+}
+
+.forge-assistant-context-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+    margin: 0.5em 0.6em;
+}
+
+.forge-assistant-context-action {
+    background: transparent;
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    color: inherit;
+    cursor: pointer;
+    flex: 1 1 auto;
+    font: inherit;
+    font-weight: 600;
+    min-height: 2.2em;
+    padding: 0 0.9em;
+}
+
+.forge-assistant-context-action[data-action="compact"] {
+    border-color: var(--color-accent, #2563eb);
+}
+
+.forge-assistant-context-summary {
+    font-size: 0.85em;
+    margin: 0.2em 0.6em 0.6em;
+    max-height: 12em;
+    opacity: 0.9;
+    overflow-y: auto;
+    white-space: pre-wrap;
 }
 
 .forge-assistant-status[data-kind="warn"] {

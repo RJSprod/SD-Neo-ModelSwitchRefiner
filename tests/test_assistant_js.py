@@ -608,7 +608,8 @@ class TestTheStylesheetCanHideThings:
                           "send", "unread", "suppressed", "selector", "transcript",
                           "composer", "status", "filePicker", "launcherIcon",
                           "launcherLabel", "input", "ghost", "workspaces",
-                          "picker", "editBar", "dock", "wangp", "promptNote"}, hidden
+                          "picker", "editBar", "dock", "wangp", "promptNote",
+                          "context"}, hidden
 
 
 class TestOpeningAndClosing:
@@ -2837,7 +2838,8 @@ class TestFreeFloat:
         """, sources=("shell",))
 
         assert found["labels"] == ["Chat · Ada", "New chat", "Threads", "Emotion",
-                                   "Composer", "Auto Attach", "Send to Generate",
+                                   "Context", "Composer", "Auto Attach",
+                                   "Send to Generate",
                                    "Panel", "Free Float Button", "Free Float Panel",
                                    "Tab Bar in Focus",
                                    "Tap Outside to Close", "Transpose View", "Models",

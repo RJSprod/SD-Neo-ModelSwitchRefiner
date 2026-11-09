@@ -109,6 +109,7 @@ from pathlib import Path
 import gradio as gr
 
 import mc_llm_attachments
+import mc_llm_compact
 import mc_llm_format
 import mc_llm_generation
 import mc_llm_overlays
@@ -407,6 +408,15 @@ def build() -> dict:
             # them moves the transcript by a pixel when it arrives.
             status = gr.HTML(ui.notice("Ready."), elem_id=ui.ident("chat", "status"),
                              elem_classes=ui.classes("chat-status"))
+            # How full the thread's context is (mc_llm_window), drawn here and
+            # shown by javascript/llm_studio.js at the right end of the status
+            # line, which it asks for again whenever that line changes -- after a
+            # reply, a trim, a compaction, a change of thread. A bridge rather
+            # than one more output of every handler that writes the line.
+            context_meter = gr.HTML(_context_meter(who, initial_thread), visible=False,
+                                    elem_id=ui.ident("chat", "context"))
+            context_now = gr.Button("Read how full the context is", visible=False,
+                                    elem_id=ui.ident("chat", "context-now"))
 
             with gr.Row(elem_id=ui.ident("chat", "composer"),
                         elem_classes=ui.classes("composer")) as composer:
@@ -669,6 +679,44 @@ def build() -> dict:
                     start_set = gr.Button("Set", size="sm", scale=0, min_width=72,
                                           variant="primary",
                                           elem_id=ui.ident("chat", "start-set"))
+            # The thread's context window (mc_llm_window, mc_llm_compact,
+            # 2026-11-09: "the ability to see how full my context window is ...
+            # adjust the context window before my next reply ... keep the 5,000
+            # latest ... a compacting option as an alternative"). Its label says
+            # how full it is; Trim keeps the latest messages and leaves the older
+            # ones out, Compact has the model summarize them into a hidden
+            # summary sent in their place, Clear puts it back. Between whole
+            # messages, never into the last exchange.
+            initial_reading = _context_reading(who, initial_thread)
+            with gr.Accordion(_context_label(initial_reading), open=False,
+                              elem_id=ui.ident("chat", "context-section"),
+                              elem_classes=ui.classes("section")) as context_section:
+                context_info = gr.HTML(_context_info(initial_reading),
+                                       elem_id=ui.ident("chat", "context-info"))
+                context_keep = gr.Slider(**_keep_slider(initial_reading),
+                                         label="Keep the latest (tokens)",
+                                         elem_id=ui.ident("chat", "context-keep"))
+                context_length = gr.Slider(
+                    minimum=mc_llm_compact.SUMMARY_MIN, maximum=mc_llm_compact.SUMMARY_MAX,
+                    step=50, value=mc_llm_compact.SUMMARY_DEFAULT,
+                    label="Summary length (tokens)", info="For Compact",
+                    elem_id=ui.ident("chat", "context-length"))
+                with gr.Row(elem_classes=ui.classes("context-actions")):
+                    context_trim = gr.Button("Trim", size="sm", scale=0, min_width=72,
+                                             elem_id=ui.ident("chat", "context-trim"))
+                    context_compact = gr.Button("Compact", size="sm", scale=0, min_width=88,
+                                                variant="primary",
+                                                elem_id=ui.ident("chat", "context-compact"))
+                    context_clear = gr.Button("Clear", size="sm", scale=0, min_width=72,
+                                              elem_id=ui.ident("chat", "context-clear"))
+                    context_cancel = gr.Button("Cancel compacting", size="sm", scale=0,
+                                               min_width=72, visible=False,
+                                               elem_id=ui.ident("chat", "context-cancel"))
+                context_summary = gr.Textbox(**_summary_box(initial_reading),
+                                             label="Summary sent in place of the older "
+                                                   "messages", interactive=False, lines=4,
+                                             max_lines=12,
+                                             elem_id=ui.ident("chat", "context-summary"))
             # How this thread's replies are sampled, kept with the thread
             # (mc_llm_generation, 2026-11-09: "These should be kept per
             # conversation ... It should be default until I override for a
@@ -774,6 +822,9 @@ def build() -> dict:
     # order: what ``_generation_view`` answers.
     generation_drawn = ([generation_section]
                         + [generation[key] for key in mc_llm_generation.KEYS])
+    # The Context section and the meter: what ``_context_view`` answers.
+    context_drawn = [context_section, context_info, context_keep, context_summary,
+                     context_cancel, context_meter]
     # The State first, then one visibility per surface: the order
     # :func:`_screens` answers in. The tail is the surfaces this panel does not
     # own and closes anyway -- see :mod:`mc_llm_overlays`. It is built from the
@@ -809,6 +860,8 @@ def build() -> dict:
                           outputs=[favourites_section, threads_section], queue=False)
     to_conversation.click(fn=_generation_view, inputs=[character, thread_state],
                           outputs=generation_drawn, queue=False)
+    to_conversation.click(fn=_context_view, inputs=[character, thread_state],
+                          outputs=context_drawn, queue=False)
     to_conversation.click(fn=_emotion_view, inputs=[character, thread_state],
                           outputs=emotions_drawn, queue=False)
     to_conversation.click(fn=_start_view, inputs=[character, thread_state],
@@ -865,6 +918,27 @@ def build() -> dict:
     generation_reset.click(fn=_generation_reset, inputs=[character, thread_state],
                            outputs=generation_drawn + [status], queue=False)
 
+    # -- the thread's context window ----------------------------------------- #
+    #
+    # The meter is asked for again by the page whenever the status line changes
+    # (javascript/llm_studio.js); the section's actions draw it themselves.
+    # Compact follows the summary being written until it is done, on the
+    # status line, and draws the section again after it.
+    context_now.click(fn=_context_meter, inputs=[character, thread_state],
+                      outputs=[context_meter], queue=False, show_progress="hidden")
+    context_trim.click(fn=_context_trim, inputs=[character, thread_state, context_keep],
+                       outputs=context_drawn + [status], queue=False)
+    context_clear.click(fn=_context_clear, inputs=[character, thread_state, context_keep],
+                        outputs=context_drawn + [status], queue=False)
+    context_cancel.click(fn=_context_cancel, inputs=[character, thread_state, context_keep],
+                         outputs=context_drawn + [status], queue=False)
+    compacted = context_compact.click(
+        fn=_context_compact, inputs=[character, thread_state, context_keep, context_length],
+        outputs=context_drawn + [status], show_progress="hidden")
+    for done in (compacted,):
+        done.then(fn=_cache_status, inputs=[character, thread_state], outputs=[status],
+                  show_progress="hidden")
+
     # -- voice ------------------------------------------------------------- #
     #
     # The two switches are Forge settings and are written the moment they are
@@ -894,10 +968,14 @@ def build() -> dict:
     # A star changes how many favourites there are, and the first makes the
     # section appear.
     pressed.then(fn=_favourites_section, outputs=[favourites_section], queue=False)
+    pressed.then(fn=_context_view, inputs=[character, thread_state], outputs=context_drawn,
+                 queue=False)
     search.change(fn=_thread_rows, inputs=[character, search, thread_state],
                   outputs=[threads], queue=False)
-    new_thread.click(fn=_new_thread, inputs=[character, search],
-                     outputs=[threads, thread_state] + view + screens, queue=False)
+    made = new_thread.click(fn=_new_thread, inputs=[character, search],
+                            outputs=[threads, thread_state] + view + screens, queue=False)
+    made.then(fn=_context_view, inputs=[character, thread_state], outputs=context_drawn,
+              queue=False)
     removed = delete.click(fn=_delete_thread,
                            inputs=[character, thread_state, search, revision_state],
                            outputs=[threads, thread_state] + view, queue=False)
@@ -908,6 +986,8 @@ def build() -> dict:
     removed.then(fn=_favourites_section, outputs=[favourites_section], queue=False)
     removed.then(fn=_generation_view, inputs=[character, thread_state],
                  outputs=generation_drawn, queue=False)
+    removed.then(fn=_context_view, inputs=[character, thread_state], outputs=context_drawn,
+                 queue=False)
     removed.then(fn=_emotion_view, inputs=[character, thread_state], outputs=emotions_drawn,
                  queue=False)
     removed.then(fn=_start_view, inputs=[character, thread_state], outputs=starts_drawn,
@@ -954,6 +1034,8 @@ def build() -> dict:
                   queue=False)
     switched.then(fn=_generation_view, inputs=[character, thread_state],
                   outputs=generation_drawn, queue=False)
+    switched.then(fn=_context_view, inputs=[character, thread_state], outputs=context_drawn,
+                  queue=False)
     edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
     new_character.click(fn=_new_character, outputs=editor, queue=False)
     refresh_characters.click(fn=_refresh_characters, inputs=[character],
@@ -2035,6 +2117,205 @@ def _generation_reset(who, identifier) -> list:
             ui.notice("The settings could not be reset.", "error")]
     return _generation_view(who, identifier) + [
         ui.notice("This thread is back to its defaults.")]
+
+
+# -- the context window ---------------------------------------------------------- #
+
+
+def _context_reading(who, identifier):
+    """How full the thread's context is (``mc_llm_conversation_ops.context_reading``),
+    or None for no thread, or when it cannot be said."""
+    if not who or not identifier:
+        return None
+    try:
+        import mc_llm_conversation_ops as ops
+        from mc_llm_conversation_store import Key
+
+        return ops.context_reading(Key(character=who, thread_id=identifier))
+    except Exception:
+        logger.debug("Model Chain: could not read how full this thread's context is",
+                     exc_info=True)
+        return None
+
+
+def _compacting(reading) -> bool:
+    progress = (reading or {}).get("compacting") or {}
+    return progress.get("phase") in ("waiting", "preparing", "writing")
+
+
+def _context_state(reading) -> str:
+    """``ok``, ``near`` (within a tenth of where the window moves by itself),
+    ``full`` (past it: the next message moves it) or ``compacting``."""
+    if _compacting(reading):
+        return "compacting"
+    used, room = int(reading.get("used") or 0), int(reading.get("room") or 0)
+    if room and used > room:
+        return "full"
+    if room and used > room * 0.9:
+        return "near"
+    return "ok"
+
+
+def _context_numbers(reading) -> str:
+    """``4,401 / 8,192``, with ``≈`` when it is an estimate."""
+    mark = "" if reading.get("exact") else "≈"
+    return f"{mark}{int(reading.get('used') or 0):,} / {int(reading.get('limit') or 0):,}"
+
+
+def _context_title(reading) -> str:
+    """The meter's longer reading, for its tooltip and the section's first line."""
+    sent, total = int(reading.get("sent") or 0), int(reading.get("messages") or 0)
+    parts = [f"{int(reading.get('used') or 0):,} of {int(reading.get('limit') or 0):,} "
+             f"tokens in context{'' if reading.get('exact') else ' (estimated)'}",
+             f"{sent} of {total} messages sent"]
+    summary = reading.get("summary")
+    if summary:
+        parts.append(f"a summary of the {int(summary.get('covers') or 0)} before them "
+                     f"({int(summary.get('tokens') or 0):,} tokens)")
+    parts.append(f"{int(reading.get('reserve') or 0):,} kept for a reply")
+    parts.append(f"older messages leave past {int(reading.get('room') or 0):,}")
+    if _compacting(reading):
+        parts.append("compacting now")
+    return " · ".join(parts)
+
+
+def _context_meter(who, identifier=None, reading=None) -> str:
+    """The meter's markup for the status line: quiet numbers, nothing for no thread."""
+    from html import escape
+
+    if reading is None:
+        reading = _context_reading(who, identifier)
+    if not reading:
+        return ""
+    return (f'<span class="mc-llm-context" data-state="{_context_state(reading)}" '
+            f'title="{escape(_context_title(reading), quote=True)}">'
+            f'{escape(_context_numbers(reading))}</span>')
+
+
+def _context_label(reading) -> str:
+    """``Context · 4,401 / 8,192``, and ``· summary`` for a compacted thread."""
+    if not reading:
+        return "Context"
+    label = f"Context · {_context_numbers(reading)}"
+    if reading.get("summary"):
+        label += " · summary"
+    return label
+
+
+def _context_info(reading) -> str:
+    if not reading:
+        return ui.notice("Choose a thread to see its context.")
+    return ui.notice(_context_title(reading) + ".")
+
+
+def _keep_slider(reading) -> dict:
+    """Keep the latest: up to the context, starting at three fifths of it -- the
+    5,000 of an 8,192 the request named."""
+    limit = int((reading or {}).get("limit") or 8192)
+    top = max((limit // 100) * 100, 500)
+    return {"minimum": 0, "maximum": top, "step": 100,
+            "value": min(max(int(limit * 0.6) // 100 * 100, 500), top)}
+
+
+def _summary_box(reading) -> dict:
+    summary = (reading or {}).get("summary") or {}
+    return {"value": summary.get("text") or "", "visible": bool(summary)}
+
+
+def _context_view(who, identifier, keep=None) -> list:
+    """The section's label, its reading, the Keep slider's range (and the value
+    already chosen), the summary, Cancel's visibility -- and the meter."""
+    reading = _context_reading(who, identifier)
+    slider = _keep_slider(reading)
+    if keep is not None:
+        slider["value"] = min(max(int(keep), 0), slider["maximum"])
+    return [gr.update(label=_context_label(reading)), _context_info(reading),
+            gr.update(**slider), gr.update(**_summary_box(reading)),
+            gr.update(visible=_compacting(reading)),
+            _context_meter(who, identifier, reading)]
+
+
+def _context_trim(who, identifier, keep) -> list:
+    """Keep the latest messages that fit in ``keep`` tokens and leave the rest out."""
+    import mc_llm_conversation_service as service
+
+    if not who or not identifier:
+        return _context_view(who, identifier, keep) + [
+            ui.notice("Choose a character and a thread first.", "warn")]
+    outcome = _command(service.SET_WINDOW, who, identifier,
+                       payload={"keep_tokens": int(keep or 0)})
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return _context_view(who, identifier, keep) + [ui.notice(note, kind)]
+    kept = outcome.get("kept") or {}
+    reading = outcome.get("context") or {}
+    note = (f"Sending the latest {int(kept.get('messages') or 0)} of "
+            f"{int(reading.get('messages') or 0)} messages "
+            f"({int(kept.get('tokens') or 0):,} tokens).")
+    return _context_view(who, identifier, keep) + [ui.notice(note)]
+
+
+def _context_clear(who, identifier, keep) -> list:
+    """No summary, and the newest messages that fit again."""
+    import mc_llm_conversation_service as service
+
+    if not who or not identifier:
+        return _context_view(who, identifier, keep) + [
+            ui.notice("Choose a character and a thread first.", "warn")]
+    outcome = _command(service.CLEAR_WINDOW, who, identifier)
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return _context_view(who, identifier, keep) + [ui.notice(note, kind)]
+    return _context_view(who, identifier, keep) + [
+        ui.notice("The context sends the newest messages that fit again.")]
+
+
+def _context_cancel(who, identifier, keep) -> list:
+    import mc_llm_conversation_service as service
+
+    if who and identifier:
+        _command(service.CANCEL_COMPACT, who, identifier)
+    return _context_view(who, identifier, keep) + [gr.update()]
+
+
+def _context_compact(who, identifier, keep, length):
+    """Have the model summarize what goes, and say how it is getting on until it
+    is done. A generator: the summary is written on the server's own thread, and
+    this only follows it, so leaving the page loses nothing."""
+    import time
+
+    import mc_llm_conversation_service as service
+
+    if not who or not identifier:
+        yield _context_view(who, identifier, keep) + [
+            ui.notice("Choose a character and a thread first.", "warn")]
+        return
+    outcome = _command(service.COMPACT, who, identifier,
+                       payload={"keep_tokens": int(keep or 0),
+                                "summary_tokens": int(length or mc_llm_compact.SUMMARY_DEFAULT)})
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        yield _context_view(who, identifier, keep) + [ui.notice(note, kind)]
+        return
+    asked = outcome.get("compacting") or {}
+    yield _context_view(who, identifier, keep) + [
+        ui.working(f"Compacting {int(asked.get('messages') or 0)} messages…")]
+    from mc_llm_conversation_store import Key
+
+    key = Key(character=who, thread_id=identifier)
+    began = time.monotonic()
+    while mc_llm_compact.running(key) and time.monotonic() - began < 1800:
+        progress = mc_llm_compact.progress(key) or {}
+        status = progress.get("status") or "Compacting…"
+        written = int(progress.get("written") or 0)
+        if progress.get("phase") == "writing" and written:
+            status = f"Summarizing… {written:,} characters"
+        yield [gr.update()] * 6 + [ui.working(status)]
+        time.sleep(0.5)
+    ended = mc_llm_compact.progress(key) or {}
+    kind = {"done": "info", "cancelled": "warn"}.get(ended.get("phase"), "error")
+    yield _context_view(who, identifier, keep) + [
+        ui.notice(ended.get("status") or "Compacting ended.", kind)]
 
 
 # -- the thread lists, folded -------------------------------------------------- #

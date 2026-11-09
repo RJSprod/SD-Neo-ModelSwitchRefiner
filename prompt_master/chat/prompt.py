@@ -127,10 +127,19 @@ def greeting_text(character: Character, persona: Persona) -> str:
                       persona.display)
 
 
+def system_message(character: Character, persona: Persona, system_extra: str = "") -> str:
+    """The system message :func:`build` sends: the character's prompt, then what
+    the thread adds to it after a blank line."""
+    system = system_text(character, persona)
+    if system_extra.strip():
+        system = f"{system}\n\n{system_extra.strip()}"
+    return system
+
+
 def build(character: Character, persona: Persona, messages: list[Message],
           context_size: int = 8192, reply_tokens: int = 512,
           instruction: str | None = None, every_picture: bool = False,
-          system_extra: str = "") -> list[dict[str, Any]]:
+          system_extra: str = "", trim: bool = True) -> list[dict[str, Any]]:
     """The request body's ``messages``, trimmed to fit.
 
     ``instruction`` is appended as a final user turn when the caller wants
@@ -143,12 +152,16 @@ def build(character: Character, persona: Persona, messages: list[Message],
     ``system_extra`` is put after the system message, a blank line between:
     what the thread adds to the character's own prompt (its emotion), counted
     in the budget like the rest of it and never written into the character.
+
+    ``trim`` false sends ``messages`` whole: the caller has chosen the window
+    already, in the model's own tokens (the extension's ``mc_llm_window``).
     """
-    system = system_text(character, persona)
-    if system_extra.strip():
-        system = f"{system}\n\n{system_extra.strip()}"
-    budget = _budget(context_size, reply_tokens, system, instruction or "")
-    kept = _fit(messages, budget, every_picture)
+    system = system_message(character, persona, system_extra)
+    if trim:
+        budget = _budget(context_size, reply_tokens, system, instruction or "")
+        kept = _fit(messages, budget, every_picture)
+    else:
+        kept = list(messages)
     with_images = _limit_images(kept, every_picture)
     wire: list[dict[str, Any]] = [{"role": "system", "content": system}]
     name, you = character.name.strip() or "the character", persona.display
@@ -328,4 +341,5 @@ def needs_vision(wire: list[dict[str, Any]]) -> bool:
 
 __all__ = ["ASSISTANT", "USER", "build", "clean_reply", "continue_instruction",
            "greeting_text", "has_image", "impersonate_instruction", "needs_vision",
-           "prefix_instruction", "stills_carried", "substitute", "system_text"]
+           "prefix_instruction", "stills_carried", "substitute", "system_message",
+           "system_text"]

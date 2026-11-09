@@ -1166,11 +1166,23 @@
         body.appendChild(jump);
         this.nodes.jump = jump;
 
+        // The status line, and at its right end how full the thread's context
+        // is (the server's mc_llm_window): quiet numbers, "4,401 / 8,192"
+        // (2026-11-09: "make it something subtle, like where the status
+        // message is"). A press opens the ⋯ menu's Context submenu.
+        const statusline = element("div", "forge-assistant-statusline");
         const status = element("p", "forge-assistant-status");
         status.setAttribute("role", "status");
         status.setAttribute("aria-live", "polite");
-        body.appendChild(status);
+        statusline.appendChild(status);
+        const context = element("button", "forge-assistant-context");
+        context.type = "button";
+        context.hidden = true;
+        context.addEventListener("click", () => this.openContext());
+        statusline.appendChild(context);
+        body.appendChild(statusline);
         this.nodes.status = status;
+        this.nodes.context = context;
 
         const composer = element("div", "forge-assistant-composer");
         // The box is the draft's, and only ever the draft's. Editing a message
@@ -4636,7 +4648,9 @@
             : (which === "threads" ? this.threadItems()
                 : (which === "emotion" ? this.emotionItems()
                     : (which === "start" ? this.startItems()
-                        : (which === "transpose" ? this.transposeItems() : this.utilityItems()))));
+                        : (which === "context" ? this.contextItems()
+                            : (which === "transpose" ? this.transposeItems()
+                                : this.utilityItems())))));
         items.forEach((item) => menu.appendChild(item));
         menu.appendChild(this.cancelItem());
         menu.hidden = false;
@@ -4870,7 +4884,8 @@
     Shell.prototype.utilityItems = function () {
         const character = this.store.snapshot().selection.character;
         const items = [this.groupLabel(character ? "Chat \u00b7 " + character : "Chat"),
-                       this.newChatItem(), this.threadsItem(), this.emotionItem()];
+                       this.newChatItem(), this.threadsItem(), this.emotionItem(),
+                       this.contextItem()];
         if (NS.systemEditor) items.push(this.systemPromptItem());
         items.push(this.groupLabel("Composer"), this.autoAttachItem(),
                    this.sendToGenerateItem());
@@ -5153,6 +5168,241 @@
         const label = on ? "Emotion: " + on : "Emotion: Off";
         pill.setAttribute("aria-label", label);
         pill.title = label;
+    };
+
+    // -- the thread's context window ----------------------------------------- //
+    //
+    // How full the thread's context is, and what to do about it before the next
+    // message (the server's mc_llm_window and mc_llm_compact; 2026-11-09: "the
+    // ability to see how full my context window is ... adjust the context
+    // window before my next reply ... keep the 5,000 latest ... a compacting
+    // option as an alternative"). Trim keeps the latest messages and leaves the
+    // older ones out; Compact has the model summarize them into a summary sent
+    // in their place; Clear puts the window back. Between whole messages, never
+    // into the last exchange -- the server's rule, so both views keep it.
+
+    const CONTEXT_RUNNING = ["waiting", "preparing", "writing"];
+    const CONTEXT_SUMMARY = {min: 100, max: 1500, step: 50, value: 300};
+
+    function shownContext(view) {
+        const snapshot = (view && view.conversation) || {};
+        return snapshot.context || null;
+    }
+    NS.shownContext = shownContext;
+
+    function contextCompacting(context) {
+        const progress = context && context.compacting;
+        return !!(progress && CONTEXT_RUNNING.indexOf(progress.phase) >= 0);
+    }
+
+    /** "4,401 / 8,192", "≈" in front when it is an estimate. */
+    function contextNumbers(context) {
+        const mark = context.exact ? "" : "≈";
+        return mark + Number(context.used || 0).toLocaleString("en-US") + " / "
+            + Number(context.limit || 0).toLocaleString("en-US");
+    }
+    NS.contextNumbers = contextNumbers;
+
+    /** ok, near (within a tenth of where the oldest messages leave by
+     *  themselves), full (past it) or compacting: the meter's colour. */
+    function contextState(context) {
+        if (contextCompacting(context)) return "compacting";
+        const used = Number(context.used || 0);
+        const room = Number(context.room || 0);
+        if (room && used > room) return "full";
+        if (room && used > room * 0.9) return "near";
+        return "ok";
+    }
+    NS.contextState = contextState;
+
+    function contextSentence(context) {
+        const count = (value) => Number(value || 0).toLocaleString("en-US");
+        const parts = [count(context.used) + " of " + count(context.limit) + " tokens in context"
+                       + (context.exact ? "" : " (estimated)"),
+                       context.sent + " of " + context.messages + " messages sent"];
+        if (context.summary) {
+            parts.push("a summary of the " + context.summary.covers + " before them ("
+                       + count(context.summary.tokens) + " tokens)");
+        }
+        parts.push(count(context.reserve) + " kept for a reply");
+        parts.push("older messages leave past " + count(context.room));
+        return parts.join(" · ");
+    }
+    NS.contextSentence = contextSentence;
+
+    /** The meter at the right end of the status line. */
+    Shell.prototype.renderContext = function (view) {
+        const meter = this.nodes.context;
+        if (!meter) return;
+        const context = view.selection.thread ? shownContext(view) : null;
+        const text = context ? contextNumbers(context) : "";
+        const state = context ? contextState(context) : "";
+        // Every render calls this, a streamed reply once a frame: written only
+        // when it changed.
+        if (meter.dataset.text !== text || meter.dataset.state !== state) {
+            meter.dataset.text = text;
+            meter.dataset.state = state;
+            meter.textContent = text;
+            meter.hidden = !text;
+            const said = context ? contextSentence(context) : "";
+            meter.title = said;
+            meter.setAttribute("aria-label", said ? "Context: " + said : "Context");
+        }
+        // How a compaction ended, said once, when it ends.
+        const progress = context && context.compacting;
+        const phase = progress ? progress.phase : "";
+        const was = this._compactPhase || "";
+        this._compactPhase = phase;
+        if (was && CONTEXT_RUNNING.indexOf(was) >= 0 && phase
+                && CONTEXT_RUNNING.indexOf(phase) < 0 && progress.status) {
+            this.tell(progress.status, phase === "done" ? "info" : "warn");
+        }
+    };
+
+    /** Into the Context submenu, saying how full it is. */
+    Shell.prototype.contextItem = function () {
+        const view = this.store.snapshot();
+        const context = view.selection.thread ? shownContext(view) : null;
+        const item = element("button",
+                             "forge-assistant-menu-item forge-assistant-submenu "
+                             + "forge-assistant-context-item", "Context");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("aria-haspopup", "menu");
+        item.appendChild(element("span", "forge-assistant-context-value",
+                                 context ? contextNumbers(context) : ""));
+        item.disabled = !view.selection.thread;
+        item.title = context ? contextSentence(context) : "Choose a conversation first";
+        item.addEventListener("click", () => this.showMenu("context"));
+        return item;
+    };
+
+    function contextRange(label, value, min, max, step) {
+        const row = element("label", "forge-assistant-context-range");
+        const head = element("span", "forge-assistant-context-range-head");
+        head.appendChild(element("span", "", label));
+        const readout = element("span", "forge-assistant-context-readout",
+                                Number(value).toLocaleString("en-US"));
+        head.appendChild(readout);
+        const input = element("input", "forge-assistant-context-slider");
+        input.type = "range";
+        input.min = String(min);
+        input.max = String(max);
+        input.step = String(step);
+        input.value = String(value);
+        input.setAttribute("aria-label", label);
+        input.addEventListener("input", () => {
+            readout.textContent = Number(input.value).toLocaleString("en-US");
+        });
+        row.appendChild(head);
+        row.appendChild(input);
+        return {row, input};
+    }
+
+    /** The Context submenu: how full it is, Keep the latest, Summary length,
+     *  Trim / Compact / Clear, the summary if there is one -- and while a
+     *  compaction runs, how it is getting on and Cancel. */
+    Shell.prototype.contextItems = function () {
+        const view = this.store.snapshot();
+        const snapshot = view.conversation || {};
+        const shown = snapshot.conversation || {};
+        const context = shownContext(view);
+        const items = [this.backItem(),
+                       this.groupLabel(shown.title ? "Context · " + shown.title : "Context")];
+        if (!context) {
+            items.push(element("p", "forge-assistant-context-note",
+                               "Choose a conversation to see its context."));
+            return items;
+        }
+        items.push(element("p", "forge-assistant-context-note", contextSentence(context) + "."));
+        if (contextCompacting(context)) {
+            const progress = context.compacting || {};
+            const written = Number(progress.written || 0);
+            items.push(element("p", "forge-assistant-context-note forge-assistant-context-busy",
+                               progress.phase === "writing" && written
+                                   ? "Summarizing… " + written.toLocaleString("en-US")
+                                     + " characters"
+                                   : (progress.status || "Compacting…")));
+            const cancel = element("button", "forge-assistant-menu-item forge-assistant-context-cancel",
+                                   "Cancel compacting");
+            cancel.type = "button";
+            cancel.setAttribute("role", "menuitem");
+            cancel.addEventListener("click", () => this.contextAction("cancel_compact"));
+            items.push(cancel);
+            return items;
+        }
+        const limit = Number(context.limit || 8192);
+        const top = Math.max(Math.floor(limit / 100) * 100, 500);
+        const keepValue = Math.min(Math.max(Math.floor(limit * 0.6 / 100) * 100, 500), top);
+        const keep = contextRange("Keep the latest (tokens)", this._contextKeep || keepValue,
+                                  0, top, 100);
+        keep.input.addEventListener("change", () => { this._contextKeep = Number(keep.input.value); });
+        const length = contextRange("Summary length (tokens)",
+                                    this._contextLength || CONTEXT_SUMMARY.value,
+                                    CONTEXT_SUMMARY.min, CONTEXT_SUMMARY.max, CONTEXT_SUMMARY.step);
+        length.input.addEventListener("change", () => {
+            this._contextLength = Number(length.input.value);
+        });
+        items.push(keep.row, length.row);
+        const actions = element("div", "forge-assistant-context-actions");
+        [["Trim", "set_window", "Keep the latest messages that fit, and leave the older ones out"],
+         ["Compact", "compact", "Summarize the older messages, and send the summary in their place"],
+         ["Clear", "clear_window", "No summary, and the newest messages that fit again"]]
+            .forEach(([label, action, title]) => {
+                const button = element("button", "forge-assistant-context-action", label);
+                button.type = "button";
+                button.title = title;
+                button.dataset.action = action;
+                button.addEventListener("click", () => this.contextAction(action, {
+                    keep: Number(keep.input.value), length: Number(length.input.value)}));
+                actions.appendChild(button);
+            });
+        items.push(actions);
+        if (context.summary && context.summary.text) {
+            items.push(this.groupLabel("Summary sent in place of the older messages"));
+            items.push(element("p", "forge-assistant-context-summary", context.summary.text));
+        }
+        return items;
+    };
+
+    /** One of the submenu's actions, through the store; the snapshot the answer
+     *  brings is drawn, and a refusal is said. */
+    Shell.prototype.contextAction = function (action, values) {
+        const chosen = values || {};
+        const asked = action === "set_window" ? this.store.setWindow(chosen.keep)
+            : (action === "compact" ? this.store.compact(chosen.keep, chosen.length)
+                : (action === "clear_window" ? this.store.clearWindow()
+                    : this.store.cancelCompact()));
+        return asked.then((outcome) => {
+            if (outcome && !outcome.ok) {
+                this.tell((outcome.error && outcome.error.message)
+                    || "That could not be done.", "warn");
+            } else if (action === "set_window" && outcome && outcome.kept) {
+                this.tell("Sending the latest " + outcome.kept.messages + " messages ("
+                          + Number(outcome.kept.tokens || 0).toLocaleString("en-US")
+                          + " tokens).", "info");
+            } else if (action === "compact" && outcome && outcome.compacting) {
+                this.tell("Compacting " + outcome.compacting.messages + " messages…", "info");
+            } else if (action === "clear_window") {
+                this.tell("The context sends the newest messages that fit again.", "info");
+            }
+            return this.store.refresh();
+        }).then(() => this.redrawContext());
+    };
+
+    /** The Context submenu, from the meter: the ⋯ menu opened a level down. */
+    Shell.prototype.openContext = function () {
+        const menu = this.nodes.menu;
+        menu.dataset.owner = "utilities";
+        this.showMenu("context");
+        this.nodes.utilities.setAttribute("aria-expanded", "true");
+        this.host.openOnly(this.menuHandle);
+    };
+
+    /** Draw the submenu again, if it is still the one up. */
+    Shell.prototype.redrawContext = function () {
+        const menu = this.nodes.menu;
+        if (menu && !menu.hidden && menu.dataset.which === "context") this.showMenu("context");
     };
 
     // -- the start of the next reply ---------------------------------------- //
@@ -6637,6 +6887,7 @@
          this.nodes.status].forEach((node) => {
             if (node) node.hidden = suppress;
         });
+        if (this.nodes.context && suppress) this.nodes.context.hidden = true;
         // Suppression hides; it never unsubscribes, never cancels a reply and
         // never stops playback. What is behind it is still happening.
     };
@@ -6656,6 +6907,7 @@
         this.renderAutoAttach();
         this.renderReadAloud(view);
         this.renderEmotion(view);
+        this.renderContext(view);
         this.renderStart(view);
         this.renderTranscript(view);
         this.renderStatus(view);
@@ -7761,6 +8013,18 @@
         // of emotion or a reply started from your words. Quiet: nothing waits
         // on it until a message is sent, and
         // that message's own progress then says it is waiting for it.
+        // The thread being compacted (the server's mc_llm_compact): quiet as
+        // the cache update is, since nothing waits on it unless a message is
+        // sent, which is then refused with a sentence.
+        const compacting = view.selection.thread ? shownContext(view) : null;
+        if (compacting && contextCompacting(compacting)) {
+            const progress = compacting.compacting || {};
+            const written = Number(progress.written || 0);
+            this.say(progress.phase === "writing" && written
+                ? "Summarizing\u2026 " + written.toLocaleString("en-US") + " characters"
+                : (progress.status || "Compacting\u2026"), "updating");
+            return;
+        }
         if (view.cacheUpdate && view.selection.thread) {
             this.say("Updating cache…", "updating");
             return;
