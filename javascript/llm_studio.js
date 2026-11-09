@@ -1859,6 +1859,123 @@
         });
     }
 
+    // -- how full the context is -------------------------------------------- //
+
+    // The thread's context meter (mc_llm_window): Python draws it into a hidden
+    // box, and it is shown here at the right end of the status line -- where
+    // "Replying…" and "Ready." are -- quiet numbers, "4,401 / 8,192"
+    // (2026-11-09: "make it something subtle, like where the status message
+    // is"). It is asked for again through a hidden button whenever the line
+    // changes: a reply ending, a thread opened, a trim. One request a change,
+    // never a poll. A press on it opens the Conversation pop-up at its Context
+    // section, where it can be trimmed or compacted.
+    const CONTEXT_SOURCE = "mc-llm-chat-context";
+    const CONTEXT_NOW = "mc-llm-chat-context-now";
+    const CONTEXT_STATUS = "mc-llm-chat-status";
+    const CONTEXT_SECTION = "mc-llm-chat-context-section";
+    const CONTEXT_CHIP = "mc-llm-chat-to-conversation";
+    const CONTEXT_SHEET = "mc-llm-chat-conversation";
+    const CONTEXT_SHOWN = "mc-llm-context-shown";
+    const CONTEXT_ASK_MS = 400;
+    const CONTEXT_OPEN_TRIES = 20;
+    const CONTEXT_OPEN_EVERY_MS = 100;
+    let contextAsk = 0;
+
+    function showContext() {
+        const source = byId(CONTEXT_SOURCE);
+        const status = byId(CONTEXT_STATUS);
+        if (!source || !status) return null;
+        const reading = source.querySelector(".mc-llm-context");
+        let shown = status.querySelector("." + CONTEXT_SHOWN);
+        if (!reading || !reading.textContent.trim()) {
+            if (shown) shown.remove();
+            return null;
+        }
+        if (!shown) {
+            shown = document.createElement("button");
+            shown.type = "button";
+            shown.className = CONTEXT_SHOWN;
+            shown.addEventListener("click", function (event) {
+                event.preventDefault();
+                openContext();
+            });
+            status.appendChild(shown);
+        }
+        const text = reading.textContent.trim();
+        if (shown.textContent !== text) shown.textContent = text;
+        const title = reading.getAttribute("title") || "";
+        if (shown.title !== title) {
+            shown.title = title;
+            shown.setAttribute("aria-label", "Context: " + title);
+        }
+        const state = reading.getAttribute("data-state") || "ok";
+        if (shown.getAttribute("data-state") !== state) shown.setAttribute("data-state", state);
+        return shown;
+    }
+
+    function askContext() {
+        window.clearTimeout(contextAsk);
+        contextAsk = window.setTimeout(function () { press(CONTEXT_NOW); }, CONTEXT_ASK_MS);
+    }
+
+    // Whether a change to the status line was only one of the two things this
+    // script keeps on it -- the meter, and the seconds a busy line counts --
+    // rather than a new line. The seconds change once a second while a reply
+    // is written, and are no reason to ask again.
+    const CONTEXT_OWN = [CONTEXT_SHOWN, "mc-llm-busy-elapsed"];
+
+    function own(node) {
+        const element = node && node.nodeType === 1 ? node : node && node.parentElement;
+        return !!(element && element.classList
+                  && CONTEXT_OWN.some(function (name) { return element.classList.contains(name); }));
+    }
+
+    function meterOnly(mutations) {
+        return mutations.every(function (mutation) {
+            if (own(mutation.target)) return true;
+            const nodes = Array.prototype.slice.call(mutation.addedNodes || [])
+                .concat(Array.prototype.slice.call(mutation.removedNodes || []));
+            return nodes.length > 0 && nodes.every(own);
+        });
+    }
+
+    function openContext() {
+        const sheet = byId(CONTEXT_SHEET);
+        if (!drawn(sheet)) press(CONTEXT_CHIP);
+        let tries = 0;
+        const look = function () {
+            tries += 1;
+            const section = byId(CONTEXT_SECTION);
+            const heading = section && section.querySelector("button.label-wrap");
+            if (!heading || !drawn(heading)) {
+                if (tries < CONTEXT_OPEN_TRIES) window.setTimeout(look, CONTEXT_OPEN_EVERY_MS);
+                return;
+            }
+            if (!heading.classList.contains("open")) {
+                heading.click();   // the sheet's own rule brings an opened section into view
+            } else if (sheet) {
+                keepInView(sheet, heading);
+            }
+        };
+        window.setTimeout(look, CONTEXT_OPEN_EVERY_MS);
+    }
+
+    function wireContext() {
+        const source = byId(CONTEXT_SOURCE);
+        const status = byId(CONTEXT_STATUS);
+        if (!source || !status || status.dataset.mcLlmContext === "1") return;
+        status.dataset.mcLlmContext = "1";
+        new MutationObserver(function () { showContext(); })
+            .observe(source, {childList: true, subtree: true, characterData: true, attributes: true});
+        new MutationObserver(function (mutations) {
+            if (meterOnly(mutations)) return;
+            showContext();
+            askContext();
+        }).observe(status, {childList: true, subtree: true, characterData: true});
+        showContext();
+        askContext();
+    }
+
     function attempt(what, run) {
         try {
             run();
@@ -1878,6 +1995,7 @@
         attempt("edit in a dialog", wireEditor);
         attempt("wire the pop-up's rows", wireRows);
         attempt("count the seconds", function () { watchActivity(); tick(); });
+        attempt("show how full the context is", wireContext);
         attempt("fit the workspace", function () { watchWindow(); fit(); });
     }
 

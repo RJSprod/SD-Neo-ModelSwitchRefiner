@@ -46,3 +46,10 @@ Two consequences of dropping the src/ layer are worth knowing about:
 To update: re-copy src/prompt_master/ from a newer commit, delete ui/ and
 app.py again, and record the new commit here. Do not hand-edit these files --
 changes belong in the mc_llm_* modules that sit on top of them.
+
+The exception, kept as small as the extension could make it: a few keyword
+arguments and helpers the extension needs from the chat builder and the client,
+each additive and defaulting to upstream's behaviour -- chat/prompt.py's
+system_extra, trim and system_message, its stills_carried, and
+inference/llama_client.py's REQUEST_SAMPLER_FIELDS. `git log` on those two files
+names each change and why; a re-copy has to carry them forward.

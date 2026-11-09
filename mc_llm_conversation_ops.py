@@ -435,6 +435,10 @@ def begin(envelope, scope: str) -> dict:
         raise service.Refused(service.THREAD_BUSY,
                               "Reply in progress. Stop it before changing this conversation.",
                               operation_id=owner.operation_id if owner else "")
+    if _compacting(key):
+        raise service.Refused(service.THREAD_BUSY,
+                              "This conversation is being compacted. Send when it is done, "
+                              "or cancel it.")
     if not _reserve_recovery():
         raise service.Refused(service.SERVICE_UNAVAILABLE,
                               "There are unsaved replies waiting for a decision. "
@@ -508,6 +512,116 @@ def begin(envelope, scope: str) -> dict:
             # panel, so every reply sent from it was synthesised for thirty
             # seconds for nobody and dropped -- mc_voice_turn.CLIENT_WAIT).
             "speech_turn_id": operation.speech_turn_id}
+
+
+def _compacting(key: Key) -> bool:
+    """Whether this thread is being compacted right now (:mod:`mc_llm_compact`)."""
+    try:
+        import mc_llm_compact
+
+        return mc_llm_compact.running(key)
+    except Exception:
+        logger.debug("Model Chain: could not ask about a compaction", exc_info=True)
+        return False
+
+
+# -- how full the window is -------------------------------------------------- #
+
+_readings: dict = {}
+_readings_lock = threading.Lock()
+READINGS_KEPT = 32
+
+
+def context_reading(key: Key) -> dict | None:
+    """How full this thread's context is, for the meter beside the status line.
+
+    ``used`` is the prompt the thread's next message is added to -- its system
+    prompt with any summary and emotion, and the messages its window sends --
+    in the model's own tokens when a server is running (``exact``), estimated
+    from the thread's own measured ratio when none is. ``limit`` is the context;
+    ``room`` is where the window has to move by itself, the context less what
+    is kept for a reply (``reserve``). Remembered until the thread, its window
+    or what it is counted against changes, so a page asking again costs
+    nothing. ``None`` for no thread.
+    """
+    import mc_llm_conversation_service as service
+    import mc_llm_window
+
+    if not key.valid:
+        return None
+    conversation, raw = store_module.read(service.chats(), key)
+    history = list(conversation.messages)
+    window = mc_llm_window.for_thread(key.character, key.thread_id)
+    emotion, steer = _emotion_of(key), _emotion_mode()
+    chosen = _generation_of(key)
+    tokens = _reply_tokens(chosen)
+    every = _every_picture()
+    import mc_llm_tokens
+
+    counter = mc_llm_tokens.for_server(window.ratio)
+    memo = (key.character, key.thread_id, str(store_module.token_of(conversation, raw)),
+            repr(window.to_dict()), emotion, steer, tokens, every, _context_size(),
+            counter.server, counter.exact)
+    with _readings_lock:
+        found = _readings.get(memo)
+    if found is None:
+        found = _reading(key, history, window, counter, tokens, every, emotion, steer)
+        with _readings_lock:
+            _readings[memo] = found
+            while len(_readings) > READINGS_KEPT:
+                _readings.pop(next(iter(_readings)))
+    reading = dict(found)
+    reading["compacting"] = _compaction_progress(key)
+    reading["updating"] = bool(_cache_pending(key))
+    return reading
+
+
+def _reading(key: Key, history, window, counter, tokens, every, emotion, steer) -> dict:
+    from prompt_master.chat.prompt import IMAGE_TOKENS, build
+
+    import mc_llm_window
+
+    character = _character(key.character)
+    persona = _persona()
+    plan, extra, counter = _windowed(key, history, character, persona, reply_limit=tokens,
+                                     every=every, emotion=emotion, steer=steer,
+                                     persist=False, counter=counter)
+    sent = history[plan.front:]
+    wire = build(character, persona, sent, context_size=plan.context, reply_tokens=tokens,
+                 every_picture=every, system_extra=extra, trim=False)
+    used, exact = counter.prompt(wire)
+    # The builder sends a picture only once its bytes are read off disk, which
+    # a reading never does: the stills the window carries are charged here.
+    used += IMAGE_TOKENS * len([index for index in mc_llm_window.stills(history, every)
+                                if index >= plan.front])
+    summary = None
+    if window.summary:
+        summary = {"tokens": window.summary_tokens, "covers": window.upto,
+                   "text": window.summary}
+    return {"used": int(used), "limit": plan.context, "room": plan.room,
+            "reserve": plan.reserve, "exact": bool(exact), "front": plan.front,
+            "sent": len(sent), "messages": len(history),
+            "first": mc_llm_window.floor(window), "summary": summary}
+
+
+def _compaction_progress(key: Key):
+    try:
+        import mc_llm_compact
+
+        return mc_llm_compact.progress(key)
+    except Exception:
+        logger.debug("Model Chain: could not read a compaction's progress", exc_info=True)
+        return None
+
+
+def _cache_pending(key: Key) -> bool:
+    try:
+        import mc_llm_cache_update
+        import mc_llm_conversation_service as service
+
+        return mc_llm_cache_update.pending(service.conversation_name(key))
+    except Exception:
+        return False
 
 
 def _fingerprint(store, key: Key) -> str:
@@ -793,10 +907,15 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
     # one message to the next; or as the start of a new reply, Oobabooga's way.
     emotion = _emotion_of(key)
     steer = _emotion_mode()
-    wire = build(character, persona, _with_pictures(list(history), every),
+    # The window the thread keeps (mc_llm_window), counted in the model's own
+    # tokens: it starts where it started last time, so the prompt begins the
+    # way the cached one did, and moves only when it no longer fits.
+    window, extra, _ = _windowed(key, list(history), character, persona, reply_limit=tokens,
+                                 every=every, emotion=emotion, steer=steer,
+                                 instruction=instruction)
+    wire = build(character, persona, _with_pictures(list(history)[window.front:], every),
                  context_size=context_size, reply_tokens=tokens, instruction=instruction,
-                 every_picture=every,
-                 system_extra=_emotion_note(emotion, character, persona, steer))
+                 every_picture=every, system_extra=extra, trim=False)
     # Read from the thread the command names: a Regenerate that lands in a
     # branch spends the start written where it was pressed.
     start = _start_for(envelope.conversation, target_kind, wire)
@@ -838,6 +957,59 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
             # pictures and system prompt.
             "emotion": emotion, "emotion_mode": steer, "history": list(history), "every_picture": every,
             "context_size": context_size, "reply_tokens": tokens}
+
+
+def _window_extra(window, emotion_note: str) -> str:
+    """What the thread adds to its character's system prompt: its summary, then
+    its emotion -- the emotion last, being the one said about now."""
+    import mc_llm_window
+
+    parts = [mc_llm_window.summary_block(window), emotion_note]
+    return "\n\n".join(part for part in parts if part)
+
+
+def _windowed(key: Key, history, character, persona, *, reply_limit: int, every: bool,
+              emotion: str, steer: str, instruction=None, persist: bool = True,
+              ahead: bool = False, counter=None):
+    """``(plan, system_extra, counter)``: where this thread's window starts for
+    ``history``, and the summary and emotion its system prompt ends with.
+
+    The window is kept (:mod:`mc_llm_window`) and moved only when it no longer
+    fits, counted in the model's own tokens when a server is running
+    (:mod:`mc_llm_tokens`); a move is kept unless ``persist`` is off. ``ahead``
+    keeps room for the next message of yours -- the check after a reply.
+    """
+    from prompt_master.chat.prompt import system_message
+
+    import mc_llm_tokens
+    import mc_llm_window
+
+    kept = mc_llm_window.for_thread(key.character, key.thread_id)
+    counter = counter or mc_llm_tokens.for_server(kept.ratio)
+    extra = _window_extra(kept, _emotion_note(emotion, character, persona, steer))
+    fixed = counter.message(system_message(character, persona, extra))
+    if instruction:
+        fixed += counter.message(instruction)
+    planner = mc_llm_window.lookahead if ahead else mc_llm_window.plan
+    found = planner(history, kept, counter, fixed, _context_size(), reply_limit, every)
+    if found.moved and persist:
+        mc_llm_window.set_front(key.character, key.thread_id, found.front)
+        logger.info("Model Chain: this conversation's window now starts at message %d of %d "
+                    "(%s tokens of %s, %s kept for the reply)%s", found.front + 1,
+                    len(history), f"{found.total:,}", f"{found.context:,}",
+                    f"{found.reserve:,}", "" if found.exact else ", estimated")
+    if counter.exact:
+        mc_llm_window.remember_ratio(key.character, key.thread_id,
+                                     _measured_ratio(history[found.front:], counter))
+    return found, extra, counter
+
+
+def _measured_ratio(messages, counter) -> float:
+    """Tokens a character over ``messages``, from counts already taken."""
+    chars = sum(len(message.text or "") for message in messages)
+    if chars < 200:
+        return 0.0
+    return sum(counter.text(message.text) for message in messages) / chars
 
 
 def _fresh_reply(target_kind: str, wire) -> bool:
@@ -1003,16 +1175,21 @@ def _thread_request(key: Key):
     character = _character(key.character)
     persona = _persona()
     every = _every_picture()
-    wire = build(character, persona, _with_pictures(list(conversation.messages), every),
-                 context_size=_context_size(),
-                 reply_tokens=_reply_tokens(_generation_of(key)),
-                 every_picture=every,
-                 system_extra=_emotion_note(_emotion_of(key), character, persona,
-                                            _emotion_mode()))
+    history = list(conversation.messages)
+    tokens = _reply_tokens(_generation_of(key))
+    # The thread's window as the next prompt will have it (mc_llm_window): after
+    # a move made for your next message, a trim, a summary or a change of emotion.
+    window, extra, _ = _windowed(key, history, character, persona, reply_limit=tokens,
+                                 every=every, emotion=_emotion_of(key),
+                                 steer=_emotion_mode())
+    wire = build(character, persona, _with_pictures(history[window.front:], every),
+                 context_size=_context_size(), reply_tokens=tokens, every_picture=every,
+                 system_extra=extra, trim=False)
     return sessions.ChatRequest(
         messages=wire, needs_vision=needs_vision(wire), max_tokens=1, seed=0,
         temperature=DEFAULT_TEMPERATURE, top_p=DEFAULT_TOP_P,
         conversation=service.conversation_name(key))
+
 
 def _execute(operation: Operation, plan: dict) -> None:
     """The reply, on a thread of its own. Never raises into anything.
@@ -1165,9 +1342,18 @@ def _finish(operation: Operation, plan: dict, streamed: str, outcome: str,
 
 
 def _update_cache_after(operation: Operation, plan: dict, whole: str) -> None:
-    """After a reply started from a line on the wire, read it again as it was saved.
+    """After a reply: make the next message cheap, while this one is read aloud.
 
-    An emotion that steers as the start of the reply (mc_llm_emotions.PREFILL)
+    **Your next message would not fit.** The thread's window moves now, before
+    you have written it (:func:`mc_llm_window.lookahead`), and the conversation
+    is read again under it in the background (:mod:`mc_llm_cache_update`): the
+    read that used to come between your message and its first word -- 33
+    seconds on the Intel Arc for a 3,300-token window, on about every second
+    message of a long thread (2026-11-09). A message sent while it reads waits
+    for what is left of it, never longer than before.
+
+    **A reply started from a line on the wire.** Read again as it was saved. An
+    emotion that steers as the start of the reply (mc_llm_emotions.PREFILL)
     leaves llama-server's cache holding its line before the reply, which the
     next prompt does not have: without this the next message would read the
     whole reply again before its first word. Words of yours
@@ -1177,6 +1363,12 @@ def _update_cache_after(operation: Operation, plan: dict, whole: str) -> None:
     words joined yours. An emotion in the system prompt needs nothing: the
     prompt is the same for the next message.
     """
+    try:
+        if _look_ahead(operation.key, plan):
+            return
+    except Exception:
+        logger.debug("Model Chain: could not look ahead at this conversation's window",
+                     exc_info=True)
     if not plan.get("prefilled"):
         return
     try:
@@ -1185,6 +1377,30 @@ def _update_cache_after(operation: Operation, plan: dict, whole: str) -> None:
         mc_llm_cache_update.schedule(operation.key, lambda: _cache_request(plan, whole))
     except Exception:
         logger.debug("Model Chain: could not start the cache update", exc_info=True)
+
+
+def _look_ahead(key: Key, plan: dict) -> bool:
+    """Whether the window had to move for your next message, and the thread is
+    being read again under it. Only with a server running: with none there is no
+    cache to keep, and the next message's own window decides."""
+    import mc_llm_cache_update
+    import mc_llm_conversation_service as service
+
+    if not mc_llm_cache_update.warm():
+        return False
+    conversation, _ = store_module.read(service.chats(), key)
+    history = list(conversation.messages)
+    if not history:
+        return False
+    window, _, _ = _windowed(key, history, plan["character"], plan["persona"],
+                             reply_limit=plan.get("reply_tokens") or _reply_tokens(
+                                 _generation_of(key)),
+                             every=bool(plan.get("every_picture")),
+                             emotion=_emotion_of(key), steer=_emotion_mode(), ahead=True)
+    if not window.moved:
+        return False
+    mc_llm_cache_update.schedule(key, lambda: _thread_request(key))
+    return True
 
 
 def _cache_request(plan: dict, whole: str):
@@ -1198,12 +1414,14 @@ def _cache_request(plan: dict, whole: str):
 
     every = bool(plan.get("every_picture"))
     history = list(plan.get("history") or []) + [Message(role=ASSISTANT, versions=[whole])]
-    wire = build(plan["character"], plan["persona"], _with_pictures(history, every),
+    character, persona = plan["character"], plan["persona"]
+    tokens = plan.get("reply_tokens") or 512
+    window, extra, _ = _windowed(plan["key"], history, character, persona, reply_limit=tokens,
+                                 every=every, emotion=plan.get("emotion") or "",
+                                 steer=plan.get("emotion_mode") or _SYSTEM, persist=False)
+    wire = build(character, persona, _with_pictures(history[window.front:], every),
                  context_size=plan.get("context_size") or _context_size(),
-                 reply_tokens=plan.get("reply_tokens") or 512, every_picture=every,
-                 system_extra=_emotion_note(plan.get("emotion") or "", plan["character"],
-                                            plan["persona"],
-                                            plan.get("emotion_mode") or _SYSTEM))
+                 reply_tokens=tokens, every_picture=every, system_extra=extra, trim=False)
     asked = plan["request"]
     return sessions.ChatRequest(messages=wire, needs_vision=needs_vision(wire),
                                 temperature=asked.temperature, top_p=asked.top_p,

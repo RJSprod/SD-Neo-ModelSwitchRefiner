@@ -3618,16 +3618,13 @@ is resumed from the cache rather than read again. **Settings → Model Chain →
 Show the model every picture in the conversation** sends every picture in the
 window as a still instead, the way it was before: each costs about 300 tokens
 of the context, so a thread full of pictures keeps fewer turns for them, and
-nothing is ever taken off a message, so the cache holds either way. The window
-moves the same way: once a conversation no longer fits the context, its front
-moves in steps of a quarter of the window rather than by one message every
-turn. From one log, the old rules — one message off the front per turn, and
-every new picture taking the still off the *oldest* picture — read a prompt of
-five thousand tokens from its first token on every turn, which on an Intel GPU
-reading 25 to 50 tokens a second was three minutes of *Replying…* before a word
-appeared. What the new rules cost is a window at worst a quarter smaller right
-after a move, and the older pictures being described to the model rather than
-seen by it.
+nothing is ever taken off a message, so the cache holds either way. From one
+log, the old rule — every new picture taking the still off the *oldest*
+picture — read a prompt of five thousand tokens from its first token on every
+turn, which on an Intel GPU reading 25 to 50 tokens a second was three minutes
+of *Replying…* before a word appeared. What the rule costs is the older
+pictures being described to the model rather than seen by it. How much of a
+long conversation is sent is the next section's.
 
 **Editing.** Every message is edited the same way, yours and the character's
 alike: pick it, change the words, change or remove the picture, Save. It edits
@@ -3635,6 +3632,85 @@ the thread. Replies that came after it stay where they are and now follow a turn
 that says something else, which is the point — asking "why did you say the sun
 was blue" only works if the earlier question really did change. **Branch from
 here** is one button along when you want the other thing.
+
+### The context window
+
+A conversation is sent to the model inside its context — 8,192 tokens a
+conversation on the managed profiles — and a long one is more than that, so
+only its latest messages are sent: its **window**. llama-server keeps what it
+has read of a conversation and reads only what is new, as long as the prompt
+still begins the way the one it read did; the moment the window's first message
+changes, everything after the system prompt is read again. On the Intel Arc,
+at about 100 tokens a second, that was 33 seconds before the first word of a
+3,300-token window — and with the old rule (the front moved a quarter of an
+estimated window at a time, and a thread of 2,000-character replies moved it
+every second message or so) it was most messages of a long thread.
+
+- **How full it is** is shown at the right end of the status line, in LLM
+  Studio and in the Forge Assistant's panel alike: quiet numbers, *4,401 /
+  8,192* — what the next message is added to, out of the context — with *≈* in
+  front while no server is running to count it exactly. They take the accent
+  colour within a tenth of where the window has to move by itself, the error
+  colour past it, and pulse while the thread is compacted. Hover for the whole
+  reading (how many messages are sent, the summary, the room kept for a reply);
+  press it for the Context controls below.
+- **The window stays where it is.** Its start is kept beside the thread
+  (`window.json` under the LLM data root, never in the thread's own file), so
+  message after message — and a Regenerate, an edit near the end, a restart —
+  sends the window the cache holds. It moves only when the next message would
+  not fit, and then far enough that the window is three quarters of the room, so
+  it does not move again for several messages. It never moves into the last
+  exchange.
+- **It moves after a reply, not before your message.** When the reply just
+  saved leaves too little room for your next message (twice your longest recent
+  message, at least 192 tokens), the window moves at once and the conversation
+  is read again in the background under it — *Updating cache…* on the status
+  line, while the reply is read aloud — so your message reads only itself. If
+  you send it while that read is still going, it waits for the rest of it,
+  never longer than it would have waited before. It needs a running server.
+- **It is counted in the model's own tokens**: a running llama-server is asked
+  (`/tokenize`, and `/apply-template` for a whole request), where the old rule
+  guessed 3.2 characters a token — about a fifth short of the room on a thread
+  that runs at four. Without a server the thread's own measured characters a
+  token is used.
+- **The room kept for a reply** follows the thread's replies: a quarter more than
+  the longest of its last five, at least 256 tokens, never more than the
+  thread's Reply tokens (512 for a thread with none yet, Oobabooga's default). A
+  thread whose replies run 500 tokens no longer keeps two or three thousand for
+  one; a reply much longer than any recent one, in a full window, can be cut
+  short, and Continue carries it on.
+
+**Context controls** — the Conversation pop-up's **Context** section in LLM
+Studio, the ⋯ menu's **Context** submenu in the panel; a press on the numbers
+opens either. Both say how full the context is and act between whole messages,
+never inside one, and never into the last exchange. They write nothing in the
+thread, and the thread is read again in the background after each, so the next
+message reads only itself.
+
+- **Keep the latest** (tokens) — how much of the conversation to keep as it is;
+  it starts at three fifths of the context.
+- **Trim** sends the latest messages that fit in that many tokens and leaves the
+  older ones out. It can bring older ones back, too, when you keep more than is
+  sent now.
+- **Compact** has the model write a summary of what the window sends before the
+  messages kept — the thread's earlier summary folded in, so the new one covers
+  everything it did — in about **Summary length** tokens, and sends it after the
+  system prompt (under *[What happened earlier in this conversation]*, before
+  the thread's emotion) in place of those messages. It is written in the
+  thread's own frame, which is what llama-server already holds, so only the
+  request for it is read before it writes; at a cool temperature and none of the
+  thread's own sampling. While it is written the status line says how far it
+  has got, a message in the thread is refused with a sentence, and **Cancel
+  compacting** stops it. A thread edited under it keeps nothing. The summary is
+  never in the transcript; the Context section and submenu show it. Messages the
+  window had already left behind before a compaction are not read back for it.
+- **Clear** forgets the summary and the start: the thread sends its newest
+  messages that fit again.
+
+Every message stays in the thread, sent or not, trimmed or summarized. A
+deleted message before the window keeps it on the same messages; **Delete from
+here** back into what a summary covers forgets the summary; a branch keeps the
+window and the summary of what it has.
 
 ### Who said what
 

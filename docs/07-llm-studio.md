@@ -5350,3 +5350,120 @@ in Chromium): the DRY box and the last slider hold, which they did not with
 the first build put back, an emotion chosen in a short window holds through
 its list's redraw, and Generation's heading still brings it into view. Five
 mutations each fail a test. Not run on the user's machine or in a Gecko build.
+
+## 50. The context window: kept, counted, read ahead; Trim and Compact (9 November 2026)
+
+> "i get a lot of delay still between reply. see my very last for example. why
+> did it take so loo ng between my submitted message and time to first token?"
+
+> "Yes I like those. Build it. Also I want the ability to see how full my
+> context window is, make it something subtle, like where the status message
+> is. I would like the ability to adjust the context window before my next
+> reply, so for example, if I am approaching 8,000 limit, I can choose to cut
+> some of the content and keep keep the 5,000 latest as an example. Also, I
+> would like a compacting option as an alternative to that, so instead of
+> keeping just the latest, the LLM can summarize the previous content into a
+> smaller compact form that is hidden, and slot that hidden content to be read
+> instead of the whole window. Maybe make it so I can choose how much to
+> compact. Both of these option should not cut off a message"
+
+**What the logs said.** The last message's 33 seconds were llama-server reading
+the whole conversation again -- 3,321 tokens at 102 a second on the Intel Arc --
+because only 200 of its tokens matched the cache: the conversation had outgrown
+the room left for it, and the trimmer (§29's "front moves in steps") moved its
+front, so everything after the system prompt began with a different message.
+Of that day's new messages in the thread, three of five moved it: the step was
+a quarter of the room, estimated at 3.2 characters a token, and the thread's
+2,000-character replies made a quarter about two exchanges. The room itself was
+small: 8,192 less the thread's Reply tokens (two or three thousand, kept for
+500-token replies) less the system prompt, at an estimate a fifth short for a
+thread that runs at about four characters a token. Oobabooga, read for
+comparison (`modules/chat.py`, August 2026), drops one message a turn, so a full
+thread is read in full every message unless its *streaming-llm* switch has
+llama-server shift its cache (`--cache-reuse 1 --swa-full`), which llama.cpp
+b10621 turns off whenever a vision projector is loaded, as it always is here.
+
+**What is built.** `mc_llm_window` keeps each thread's window -- where it starts,
+a summary that stands in for what is before it, the thread's measured ratio --
+in `window.json` beside the threads (never in the thread's file, for the
+emotion's reason). `mc_llm_conversation_ops._windowed` is where every request in
+a thread chooses its window: `_capture` (every reply), `_thread_request` (the
+cache update after a change of emotion, a trim, a summary, a move) and
+`_cache_request` (after a prefilled reply), each handing the builder the window
+whole (`prompt.build(..., trim=False)`, a keyword added to the vendored builder
+with `system_message`, which the count shares).
+
+- **Kept, not worked out.** The window starts where it started (`start_of`)
+  while it fits, and moves only when it does not -- far enough that it fills
+  three quarters of the room (`STEP`), never into the last exchange
+  (`last_kept`). A restart, a Regenerate and an edit near the end send the
+  window the cache and the saved slot hold.
+- **Read ahead.** After each reply (`_update_cache_after` → `_look_ahead`), if
+  the next message would not fit with an allowance for it (twice your longest
+  recent message, at least 192), the window moves at once and the thread is
+  read again in the background through §40's cache update, which a message sent
+  meanwhile waits for (`mc_llm_cache_update.wait`). With no server running
+  nothing is moved early.
+- **Counted.** `mc_llm_tokens.Counter` asks the running server -- `/tokenize`
+  for a message, cached by a digest of its text and the model;
+  `/apply-template` then `/tokenize` for a whole request -- and falls back to
+  the thread's measured ratio (or 3.2) without one, saying which (`exact`).
+  A message costs its text, eight tokens of turn markers, and 300 for a still.
+- **The reply's room** (`reserve`): a quarter more than the longest of the last
+  five replies, at least 256, never more than the thread's Reply tokens; 512
+  for a thread with no reply.
+- **The meter** (`context_reading`, remembered per thread revision and window):
+  `used`, the next message's prompt before it; `limit`; `room`; `reserve`;
+  `sent` of `messages`; the summary; a running compaction's progress. In the
+  snapshot as `context`, and drawn by LLM Studio from a hidden box
+  (`_context_meter`, `context-now`) that `javascript/llm_studio.js` shows at the
+  status line's end and asks for again when the line changes (never for its
+  own writes or the seconds a busy line counts); a press opens the pop-up at its
+  Context section.
+- **The Context section** (between Start reply with and Generation): the
+  reading; *Keep the latest* (0 to the context in hundreds, three fifths of it
+  to start); *Summary length* (100 to 1,500, 300); Trim, Compact, Clear and,
+  while compacting, Cancel; the summary, read-only. Its label is `Context ·
+  4,401 / 8,192` (`· summary` with one). Commands `set_window`, `compact`,
+  `clear_window`, `cancel_compact`, against no revision, refused while a reply is
+  written; `keep_latest` decides Trim's start between whole messages.
+- **Compact** (`mc_llm_compact`): the span is what the window sends before the
+  latest `keep_tokens`; one request in the thread's own frame (its system prompt
+  with the earlier summary and the emotion, the span as the window sends it,
+  then the instruction as a message of yours) so llama-server reads only the
+  instruction; `TEMPERATURE` 0.3, none of the thread's sampling; the summary's
+  length asked in words (0.75 a token), cut at 1.5 times it; a heading the model
+  adds taken off. Kept only if the span's words are unchanged (a digest);
+  `set_summary` starts the window at its end; the thread is read again. Progress
+  on the feed (`context` events); a message refused with a sentence meanwhile.
+  The console says how many messages and tokens and how long, never a word.
+- **Deletes and branches** keep the window on the same messages
+  (`mc_llm_window.removed`, from the service after a delete; `carry` from
+  `_branch_from`); Delete from here into the summary drops it; a deleted thread
+  forgets its window.
+
+**Superseded.** §29's "the front moves in steps of a quarter of the window" for
+conversation replies: the builder's `_fit` and `TRIM_STEP` remain in the
+vendored package for anything that calls it without a window, and no reply
+does. Messages already out of the window when a compaction is asked for are not
+read back for it -- reading a long thread's whole past on the Arc would be
+minutes.
+
+**Verified.** `tests/test_llm_window.py` (the rules: kept, moved to three
+quarters, never into the last exchange, the reserve, Trim's whole messages, the
+lookahead, deletes, branches, the file), `tests/test_llm_tokens.py` (exact with a
+server, cached, never another model's, a lost server estimated from then on, a
+request rendered then counted with its specials, a picture charged),
+`tests/test_llm_context_window.py` (through the real service, store and builder:
+a long thread begins its prompt the same way message after message; the window
+moves after a reply and the next message begins where that read began; a window
+counted at the thread's ratio is sent whole; Trim, Clear, a summary's place
+before the emotion; Compact in the thread's frame, kept without its heading,
+folded into the next, refused messages meanwhile, cancelled, discarded when the
+thread changed; the snapshot's reading; deletes and branches),
+`tests/test_llm_studio_context.py` and `tests/test_llm_studio_context_js.py`
+(LLM Studio's meter, section, actions and wiring), and
+`tests/live/llm_studio_conversation_live.py` on real Gradio 4.40: the meter
+inside the status line at its right end, a press opening the pop-up at Context,
+Trim saying what it kept. Twenty-eight mutations each fail a test. Not run
+against a real llama-server or on the user's machine.

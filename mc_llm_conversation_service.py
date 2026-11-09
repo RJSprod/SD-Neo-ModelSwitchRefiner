@@ -120,11 +120,28 @@ SET_START_WITH = "set_start_with"
 """The words this thread's next reply starts with (:mod:`mc_llm_start_with`), or
 empty for none. Kept beside the thread as the emotion is, so it asks for no
 revision and changes none; the reply that starts from it spends it."""
+SET_WINDOW = "set_window"
+"""Keep the latest ``keep_tokens`` of the thread's messages in its context window
+and leave the older ones out (:mod:`mc_llm_window`, *Trim*): between whole
+messages, never into the last exchange. Kept beside the thread, so it asks for
+no revision and changes none; the thread is read again under it in the
+background."""
+COMPACT = "compact"
+"""Have the model summarize what the window sends before the latest
+``keep_tokens`` of messages, in about ``summary_tokens``, and send the summary
+in their place (:mod:`mc_llm_compact`). Answers at once; the summary is written
+in the background, its progress on the feed as ``context`` events."""
+CLEAR_WINDOW = "clear_window"
+"""Forget the thread's summary and the start its window was given: it sends its
+newest messages that fit again."""
+CANCEL_COMPACT = "cancel_compact"
+"""Stop the thread's compaction. Nothing is kept of it."""
 
 ACTIONS = (CREATE_THREAD, SEND, EDIT_MESSAGE, REGENERATE, CONTINUE, RESEND_FROM_USER,
            BRANCH, SELECT_VERSION, DROP_VERSION, DELETE_MESSAGE, DELETE_FROM,
            RENAME_THREAD, SET_RESPONSE_PREFIX, DELETE_THREAD, RESTORE_TO_DRAFT, STOP,
-           SET_EMOTION, SET_START_WITH, SET_EMOTION_MODE)
+           SET_EMOTION, SET_START_WITH, SET_EMOTION_MODE, SET_WINDOW, COMPACT, CLEAR_WINDOW,
+           CANCEL_COMPACT)
 """Every command, and nothing else is one.
 
 Adding to this tuple is a compatible change; renaming anything in it is not,
@@ -354,7 +371,8 @@ def _expected(raw, action: str):
     which is the behaviour this whole module replaced.
     """
     if raw is None:
-        if action in (CREATE_THREAD, STOP, SET_EMOTION, SET_START_WITH, SET_EMOTION_MODE):
+        if action in (CREATE_THREAD, STOP, SET_EMOTION, SET_START_WITH, SET_EMOTION_MODE,
+                      SET_WINDOW, COMPACT, CLEAR_WINDOW, CANCEL_COMPACT):
             return None
         raise Refused(INVALID_INPUT, "expected_revision is required.")
     if not isinstance(raw, dict):
@@ -414,6 +432,13 @@ def _payload(raw, action: str) -> dict:
         found["emotion_mode"] = _text(raw.get("emotion_mode"), "emotion_mode", 64)
     if "start_with" in raw:
         found["start_with"] = _text(raw.get("start_with"), "start_with", 16 * 1024)
+    for name in ("keep_tokens", "summary_tokens"):
+        if name in raw:
+            count = raw.get(name)
+            if isinstance(count, bool) or not isinstance(count, int) or not \
+                    0 <= count <= 10_000_000:
+                raise Refused(INVALID_INPUT, f"{name} must be a count of tokens.")
+            found[name] = count
     if "confirm_count" in raw:
         count = raw.get("confirm_count")
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
@@ -692,6 +717,8 @@ def _dispatch(envelope: Envelope, scope: str) -> dict:
         return _set_start_with(envelope)
     if envelope.action == SET_EMOTION_MODE:
         return _set_emotion_mode(envelope)
+    if envelope.action in (SET_WINDOW, COMPACT, CLEAR_WINDOW, CANCEL_COMPACT):
+        return _window_command(envelope)
     if envelope.action in GENERATING:
         import mc_llm_conversation_ops as ops
 
@@ -716,6 +743,7 @@ def _mutate(envelope: Envelope) -> dict:
     if committed.duplicate:
         return _accepted(envelope, key, committed.revision,
                          extra={"duplicate": True, "receipt": committed.receipt})
+    _keep_window(envelope, committed)
     return _accepted(envelope, key, committed.revision,
                      extra={"detail": committed.result if isinstance(committed.result, dict)
                             else None})
@@ -923,6 +951,9 @@ def _delete_thread(envelope: Envelope) -> dict:
     mc_llm_emotions.forget(key.character, key.thread_id)
     mc_llm_start_with.forget(key.character, key.thread_id)
     mc_llm_generation.forget(key.character, key.thread_id)
+    import mc_llm_window
+
+    mc_llm_window.forget(key.character, key.thread_id)
     publish(THREAD_DELETED, key)
     return _accepted(envelope, key, 0)
 
@@ -1003,6 +1034,82 @@ def _set_start_with(envelope: Envelope) -> dict:
     return _accepted(envelope, key, revision, extra={"start_with": kept})
 
 
+def _keep_window(envelope: Envelope, committed) -> None:
+    """After a delete, the thread's context window keeps pointing at the same
+    messages (:func:`mc_llm_window.removed`). Never fails the command."""
+    if envelope.action not in (DELETE_MESSAGE, DELETE_FROM, RESTORE_TO_DRAFT):
+        return
+    try:
+        import mc_llm_window
+
+        result = committed.result if isinstance(committed.result, dict) else {}
+        count = int(result.get("removed", 1) or 0)
+        remaining = len(getattr(committed.conversation, "messages", None) or [])
+        key = envelope.conversation
+        mc_llm_window.removed(key.character, key.thread_id, envelope.target_index or 0,
+                              count, remaining)
+    except Exception:
+        logger.debug("Model Chain: could not keep a thread's window after a delete",
+                     exc_info=True)
+
+
+def _window_command(envelope: Envelope) -> dict:
+    """Trim, compact, clear or stop compacting a thread's context window. Writes
+    nothing in the thread, and answers its revision back unchanged, as the
+    emotion does; the answer carries the thread's reading as it is now."""
+    import mc_llm_compact
+    import mc_llm_conversation_ops as ops
+    import mc_llm_window
+
+    store = chats()
+    key = envelope.conversation
+    conversation, raw = store_module.read(store, key)
+    revision = store_module.token_of(conversation, raw)
+    action = envelope.action
+    extra: dict = {}
+    if action == CANCEL_COMPACT:
+        extra["cancelled"] = mc_llm_compact.cancel(key)
+        return _accepted(envelope, key, revision, extra=extra)
+    if ops.for_conversation(key) is not None:
+        raise Refused(THREAD_BUSY, "A reply is being written. Change the window when it is "
+                                   "done.")
+    if mc_llm_compact.running(key):
+        raise Refused(THREAD_BUSY, "This conversation is being compacted. Cancel it first.")
+    if action == COMPACT:
+        keep = envelope.payload.get("keep_tokens")
+        if keep is None:
+            raise Refused(INVALID_INPUT, "How much of the conversation should be kept?")
+        try:
+            extra["compacting"] = mc_llm_compact.start(
+                key, keep, envelope.payload.get("summary_tokens")
+                or mc_llm_compact.SUMMARY_DEFAULT)
+        except mc_llm_compact.Refused as refusal:
+            raise Refused(INVALID_INPUT, str(refusal))
+        return _accepted(envelope, key, revision, extra=extra)
+    before = mc_llm_window.for_thread(key.character, key.thread_id)
+    if action == CLEAR_WINDOW:
+        after = mc_llm_window.clear(key.character, key.thread_id)
+    else:
+        keep = envelope.payload.get("keep_tokens")
+        if keep is None:
+            raise Refused(INVALID_INPUT, "How much of the conversation should be kept?")
+        import mc_llm_tokens
+
+        history = list(conversation.messages)
+        front, kept = mc_llm_window.keep_latest(
+            history, before, mc_llm_tokens.for_server(before.ratio), keep,
+            ops._every_picture())
+        after = mc_llm_window.set_front(key.character, key.thread_id, front)
+        extra["kept"] = {"messages": len(history) - front, "tokens": kept}
+    if after.to_dict() != before.to_dict():
+        # A new front for every later prompt: read the conversation again under
+        # it now, in the background, rather than at the next message.
+        ops.rewarm(key)
+    publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="window")
+    extra["context"] = _context_of(key)
+    return _accepted(envelope, key, revision, extra=extra)
+
+
 def _branch(envelope: Envelope) -> dict:
     """Copy a thread through one message into a new one. Two files, one lock order.
 
@@ -1058,6 +1165,11 @@ def _branch_from(store, key: Key, expected, index: int, operation_id: str,
 
     mc_llm_emotions.carry(key.character, key.thread_id, committed.conversation.identifier)
     mc_llm_generation.carry(key.character, key.thread_id, committed.conversation.identifier)
+    # And as much of its context window as still describes it: a summary of
+    # messages the branch has, the start the window had among them.
+    import mc_llm_window
+
+    mc_llm_window.carry(key.character, key.thread_id, committed.conversation.identifier, index)
     return committed
 
 
@@ -1123,6 +1235,7 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
     }
     found["emotions"] = _emotions()
     found["emotion_mode"] = _emotion_mode()
+    found["context"] = _context_of(key)
     found["messages"] = [_message_view(index, message)
                          for index, message in enumerate(conversation.messages)]
 
@@ -1136,6 +1249,19 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
         found["operation"] = running.describe()
     found["recovery"] = [item.describe() for item in ops.recoverable(key)]
     return found
+
+
+def _context_of(key: Key):
+    """How full the thread's context window is (``mc_llm_conversation_ops.
+    context_reading``), or None when it cannot be said."""
+    try:
+        import mc_llm_conversation_ops as ops
+
+        return ops.context_reading(key)
+    except Exception:
+        logger.debug("Model Chain: could not read how full a thread's context is",
+                     exc_info=True)
+        return None
 
 
 def _emotion_of(key: Key) -> str:
@@ -1453,13 +1579,17 @@ SPEECH_STATE = "speech_state"
 RESET_REQUIRED = "reset_required"
 CAPABILITIES_CHANGED = "capabilities_changed"
 CACHE_UPDATE = "cache_update"
+CONTEXT = "context"
+"""A thread's compaction moved on or ended (:mod:`mc_llm_compact`): its progress,
+and how it ended with a sentence for the status line."""
 """The conversation being read again in the background -- after a change of
 emotion, or a reply started from your words -- or done: ``updating`` true, then
 false (:mod:`mc_llm_cache_update`)."""
 
 KINDS = (SNAPSHOT, CONVERSATION_CHANGED, THREAD_CREATED, THREAD_DELETED, CHARACTER_CHANGED,
          MODE_CHANGED, OPERATION_ACCEPTED, OPERATION_PHASE, REPLY_PATCH, OPERATION_TERMINAL,
-         RESULT_CONFLICT, SPEECH_STATE, RESET_REQUIRED, CAPABILITIES_CHANGED, CACHE_UPDATE)
+         RESULT_CONFLICT, SPEECH_STATE, RESET_REQUIRED, CAPABILITIES_CHANGED, CACHE_UPDATE,
+         CONTEXT)
 
 
 def publish(kind: str, key: Key | None = None, **payload) -> None:

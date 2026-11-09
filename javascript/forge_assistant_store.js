@@ -86,6 +86,9 @@
     // been going. The stream opens at the first word and closes at the last.
     const POLL_WAITING = 2000;
     const WRITING = ["generating", "saving"];
+    // A thread's compaction while it runs (the server's mc_llm_compact): the
+    // feed is held open for it, as for a reply.
+    const COMPACTING = ["waiting", "preparing", "writing"];
     const TERMINAL = ["completed", "stopped", "failed", "save_failed", "interrupted"];
 
     // WHILE THE PANEL IS OPEN AND NOTHING IS COMING, IT LOOKS NOW AND THEN.
@@ -843,6 +846,20 @@
             }
             break;
         }
+        case "context": {
+            // A compaction moving on, or ending: its progress on the meter and
+            // the status line, and at its end the thread read again for its
+            // new window.
+            const shown = this.snapshots.get(key);
+            const payload = event.payload || {};
+            if (shown && shown.context) {
+                shown.context.compacting = payload.compacting
+                    || (payload.outcome ? {phase: payload.outcome, status: payload.message || ""}
+                        : null);
+            }
+            if (payload.outcome && mine) this.refresh();
+            break;
+        }
         default:
             break;
         }
@@ -850,7 +867,8 @@
         // A reply ending, its read-aloud stopping, or the cache update after
         // it ending, is the end of the boundary the feed was opened for.
         if (event.kind === "operation_terminal" || event.kind === "result_conflict"
-            || event.kind === "speech_state" || event.kind === "cache_update") {
+            || event.kind === "speech_state" || event.kind === "cache_update"
+            || event.kind === "context") {
             this.review();
         }
         return true;
@@ -1364,6 +1382,47 @@
         return this.send(envelope);
     };
 
+    /** The open thread's context window (the server's mc_llm_window): keep the
+     *  latest `keep` tokens of messages and leave the older ones out. Kept
+     *  beside the thread, so no revision is asked. */
+    Store.prototype.setWindow = function (keep) {
+        const envelope = this.envelope("set_window", {expected_revision: null});
+        envelope.payload = {keep_tokens: Math.max(Math.round(Number(keep) || 0), 0)};
+        return this.send(envelope);
+    };
+
+    /** Have the model summarize what goes before the latest `keep` tokens, in
+     *  about `length` (mc_llm_compact). Answers at once; the feed carries the
+     *  progress. */
+    Store.prototype.compact = function (keep, length) {
+        const envelope = this.envelope("compact", {expected_revision: null});
+        envelope.payload = {keep_tokens: Math.max(Math.round(Number(keep) || 0), 0),
+                            summary_tokens: Math.max(Math.round(Number(length) || 0), 0)};
+        return this.send(envelope).then((outcome) => {
+            if (outcome && outcome.ok) this.review();
+            return outcome;
+        });
+    };
+
+    /** No summary, and the newest messages that fit again. */
+    Store.prototype.clearWindow = function () {
+        return this.send(this.envelope("clear_window", {expected_revision: null}));
+    };
+
+    /** Stop the open thread's compaction. */
+    Store.prototype.cancelCompact = function () {
+        return this.send(this.envelope("cancel_compact", {expected_revision: null}));
+    };
+
+    /** Whether the open thread is being compacted: from the snapshot, and from
+     *  the feed's `context` events while it lasts. */
+    Store.prototype.compacting = function () {
+        const key = conversationKey(this.selection.character, this.selection.thread);
+        const shown = this.snapshots.get(key);
+        const progress = shown && shown.context && shown.context.compacting;
+        return !!(progress && COMPACTING.indexOf(progress.phase) >= 0);
+    };
+
     /** Add a line to the shared list (`{add: line}`) or delete one
      *  (`{remove: line}`). Answers with the list as it now is. */
     Store.prototype.changeEmotions = function (change) {
@@ -1479,7 +1538,7 @@
      * says so on the feed. */
     Store.prototype.needsFeed = function () {
         return this.writing() || !!(this.speech && this.speech.playing)
-            || this.updatingCache();
+            || this.updatingCache() || this.compacting();
     };
 
     /** Whether a reply is being written right now: words are arriving, or
