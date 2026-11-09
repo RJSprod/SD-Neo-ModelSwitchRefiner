@@ -2838,7 +2838,7 @@ class TestFreeFloat:
         """, sources=("shell",))
 
         assert found["labels"] == ["Chat · Ada", "New chat", "Threads", "Emotion",
-                                   "Context", "Composer", "Auto Attach",
+                                   "Context", "Injection", "Composer", "Auto Attach",
                                    "Send to Generate",
                                    "Panel", "Free Float Button", "Free Float Panel",
                                    "Tab Bar in Focus",

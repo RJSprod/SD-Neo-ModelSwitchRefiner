@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING
 import mc_broker
 import mc_gguf
 import mc_llm_accel
+import mc_llm_control_vector
 import mc_llm_context
 import mc_llm_paths
 import mc_llm_slot_cache
@@ -2120,7 +2121,7 @@ OPTIONAL_FLAGS = frozenset({
     CPU_MOE_FLAG, N_CPU_MOE_FLAG, FLASH_ATTENTION_FLAG, NO_MMAP_FLAG,
     NO_KV_OFFLOAD_FLAG, OP_OFFLOAD_FLAG, FULL_ATTENTION_WINDOW_FLAG,
     CHECKPOINT_SPACING_FLAG, LOG_VERBOSITY_FLAG, mc_llm_slot_cache.SLOT_SAVE_FLAG,
-    mc_llm_template.TEMPLATE_FILE_FLAG,
+    mc_llm_template.TEMPLATE_FILE_FLAG, mc_llm_control_vector.FLAG,
     mc_llm_accel.SPEC_TYPE_FLAG, mc_llm_accel.SPEC_MAX_FLAG,
 })
 """Every flag this extension *chooses* to append, and none that it must.
@@ -2668,7 +2669,7 @@ def _launch_flags(configuration: Config, placement: mc_llm_context.Placement,
     """
     special = _with_runtime(configuration, plan.runtime if plan is not None else None)
     flags = (accelerator_flags(special, placement) + _wangp_thread_flags(special, placement)
-             + _template_flags(special))
+             + _template_flags(special) + _control_vector_flags(special))
     flags += _saved_cache_flags(special, flags)
     if plan is None or not plan.flags:
         return flags
@@ -2696,6 +2697,28 @@ def _template_flags(configuration: Config) -> list[str]:
     except Exception:
         logger.debug("Model Chain: could not decide on the chat template", exc_info=True)
         return []
+
+
+def _control_vector_flags(configuration: Config) -> list[str]:
+    """The control vector chosen for this model, if any. See :mod:`mc_llm_control_vector`."""
+    try:
+        return list(mc_llm_control_vector.launch_flags(configuration))
+    except Exception:
+        logger.debug("Model Chain: could not decide on the control vector", exc_info=True)
+        return []
+
+
+def _control_vector_set_aside(failure) -> bool:
+    """A start that failed for anything but memory, given a control vector: set the
+    vector aside, once, and say to try again without it. See
+    :func:`mc_llm_control_vector.set_aside_after_failure`."""
+    if failure.out_of_memory:
+        return False
+    try:
+        return bool(mc_llm_control_vector.set_aside_after_failure())
+    except Exception:
+        logger.debug("Model Chain: could not set the control vector aside", exc_info=True)
+        return False
 
 
 def _saved_cache_flags(configuration: Config, flags) -> list[str]:
@@ -4106,10 +4129,12 @@ def _saved_caches_for(process, flags, executable, configuration: Config,
                        if profile else "")
         template = (given[given.index(mc_llm_template.TEMPLATE_FILE_FLAG) + 1]
                     if mc_llm_template.TEMPLATE_FILE_FLAG in given[:-1] else "")
+        steering = (given[given.index(mc_llm_control_vector.FLAG) + 1]
+                    if mc_llm_control_vector.FLAG in given[:-1] else "")
         made = mc_llm_slot_cache.identity(
             executable, configuration.model, projector,
             full_cache=FULL_ATTENTION_WINDOW_FLAG in given, cache_types=cache_types,
-            template=template)
+            template=template, steering=steering)
         return mc_llm_slot_cache.started(process, flags, made, model=configuration.model)
     except Exception:
         logger.debug("Model Chain: could not set up saved prompt caches for this start",
@@ -4905,6 +4930,10 @@ class Runtime:
                                                expert_floor=expert_floor)
                         placement = negotiated.placement
                         signature = _signature_of(configuration, projector, placement, plan)
+                        continue
+                    if _control_vector_set_aside(failure):
+                        # A vector llama-server would not load: the model is not
+                        # to pay for it either. Started again without it, once.
                         continue
                     if not failure.out_of_memory or attempt == START_ATTEMPTS - 1:
                         raise RuntimeError(str(failure)) from None

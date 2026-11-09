@@ -172,7 +172,7 @@ def _make_gradio() -> types.ModuleType:
         "Dropdown", "Radio", "Textbox", "Slider", "Number", "Checkbox",
         "Markdown", "Row", "Column", "Group", "Accordion", "Button", "HTML",
         "State", "Gallery", "Image", "Chatbot", "File", "Blocks", "Tab",
-        "DownloadButton", "Timer", "Tabs", "TabItem",
+        "DownloadButton", "UploadButton", "Timer", "Tabs", "TabItem",
     ):
         setattr(gradio, name, type(name, (_Component,), {}))
 

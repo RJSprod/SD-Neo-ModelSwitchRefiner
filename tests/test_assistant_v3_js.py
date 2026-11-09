@@ -950,8 +950,8 @@ class TestTheMenuOpensTheEditor:
             console.log(JSON.stringify(shell.utilityItems().map((item) => item.textContent)));
         """, sources=("shell", "system"))
 
-        assert found[:6] == ["Chat · Ada", "New chat", "Threads", "Emotion", "Context",
-                             "System prompt…"]
+        assert found[:7] == ["Chat · Ada", "New chat", "Threads", "Emotion", "Context",
+                             "Injection", "System prompt…"]
 
     def test_pressing_it_puts_the_menu_away_and_opens_the_character(self):
         found = run(self.MENU + """

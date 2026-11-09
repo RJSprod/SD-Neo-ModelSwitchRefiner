@@ -560,8 +560,8 @@ def context_reading(key: Key) -> dict | None:
 
     counter = mc_llm_tokens.for_server(window.ratio)
     memo = (key.character, key.thread_id, str(store_module.token_of(conversation, raw)),
-            repr(window.to_dict()), emotion, steer, tokens, every, _context_size(),
-            counter.server, counter.exact)
+            repr(window.to_dict()), emotion, steer, _injection_note(key), tokens, every,
+            _context_size(), counter.server, counter.exact)
     with _readings_lock:
         found = _readings.get(memo)
     if found is None:
@@ -941,6 +941,9 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
         max_tokens=tokens,
         seed=asked if asked != RANDOM_SEED else resolved,
         sampling=_sampling_of(chosen, settings),
+        # The thread's injected words, as the odds of its tokens
+        # (mc_llm_injection): never part of the prompt.
+        injection=_injection_odds(key),
     )
     if request.needs_vision and not _sees():
         raise service.Refused(service.VISION_UNAVAILABLE,
@@ -959,13 +962,38 @@ def _capture(envelope, key: Key, target_index: int, target_kind: str, target_ver
             "context_size": context_size, "reply_tokens": tokens}
 
 
-def _window_extra(window, emotion_note: str) -> str:
-    """What the thread adds to its character's system prompt: its summary, then
-    its emotion -- the emotion last, being the one said about now."""
+def _window_extra(window, emotion_note: str, injection_note: str = "") -> str:
+    """What the thread adds to its character's system prompt: its summary, its
+    injected words when it tells the model them (:mod:`mc_llm_injection`), then
+    its emotion -- the emotion last, being the one said about now. Every prompt
+    the thread builds ends the same way, so its front is the same from one
+    message to the next."""
     import mc_llm_window
 
-    parts = [mc_llm_window.summary_block(window), emotion_note]
+    parts = [mc_llm_window.summary_block(window), injection_note, emotion_note]
     return "\n\n".join(part for part in parts if part)
+
+
+def _injection_note(key: Key) -> str:
+    """The note of injected words this thread's system prompt carries, or ``""``."""
+    try:
+        import mc_llm_injection
+
+        return mc_llm_injection.note_for(key.character, key.thread_id)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's injected words", exc_info=True)
+        return ""
+
+
+def _injection_odds(key: Key) -> tuple:
+    """The injected words this thread's replies weigh the odds with, or ``()``."""
+    try:
+        import mc_llm_injection
+
+        return mc_llm_injection.odds_for(key.character, key.thread_id)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's injected words", exc_info=True)
+        return ()
 
 
 def _windowed(key: Key, history, character, persona, *, reply_limit: int, every: bool,
@@ -986,7 +1014,8 @@ def _windowed(key: Key, history, character, persona, *, reply_limit: int, every:
 
     kept = mc_llm_window.for_thread(key.character, key.thread_id)
     counter = counter or mc_llm_tokens.for_server(kept.ratio)
-    extra = _window_extra(kept, _emotion_note(emotion, character, persona, steer))
+    extra = _window_extra(kept, _emotion_note(emotion, character, persona, steer),
+                          _injection_note(key))
     fixed = counter.message(system_message(character, persona, extra))
     if instruction:
         fixed += counter.message(instruction)

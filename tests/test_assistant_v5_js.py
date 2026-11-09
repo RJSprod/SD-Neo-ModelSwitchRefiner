@@ -226,6 +226,7 @@ class TestTheMenuIsGrouped:
             ["BUTTON", "menuitem", "Threads"],
             ["BUTTON", "menuitem", "Emotion"],
             ["BUTTON", "menuitem", "Context"],
+            ["BUTTON", "menuitem", "Injection"],
             ["BUTTON", "menuitem", "System prompt…"],
             ["DIV", "presentation", "Composer"],
             ["BUTTON", "menuitemcheckbox", "Auto Attach"],

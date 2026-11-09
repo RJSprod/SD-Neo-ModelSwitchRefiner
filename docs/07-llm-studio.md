@@ -5467,3 +5467,125 @@ thread changed; the snapshot's reading; deletes and branches),
 inside the status line at its right end, a press opening the pop-up at Context,
 Trim saying what it kept. Twenty-eight mutations each fail a test. Not run
 against a real llama-server or on the user's machine.
+
+## 51. Injection: words a thread leans towards, and the model's control vector (9 November 2026)
+
+> "Is there a way to make a list of words the the LLM becomes more likely to
+> include in its response? Like a word injection into the mind of the LLM that
+> can be used to subconsciously steer it."
+
+> "Good, and I like all three options, give it a menu for "Injection""
+
+**The three ways put to the user**, and what each is. The **odds**:
+llama-server's own `logit_bias`, a number added to a token's score each time
+the model picks one -- the model never reads it, nothing in the prompt changes,
+and it works on tokens rather than words. A **note** in the system prompt, as
+the emotion's is (§40.8): the model reads it, uses the words where they fit,
+and a change of it is a new front to the prompt. A **control vector**: a
+direction per layer added to the hidden state -- the closest thing to a thought
+put into the model -- made from contrasting prompts, given to llama-server only
+when it starts and so the model's rather than a thread's.
+
+**The words** (`mc_llm_injection`). Each thread keeps a list beside it
+(`injection.json`), for the emotion's reason: a write to the conversation's own
+file is a revision. A word or phrase a line, commas parting a line too, a
+strength after it when not the default +2 -- signed, or after `:` or `=`, so a
+phrase ending in a number stays a phrase -- or `ban`; sixty-four words, each at
+most sixty-four characters, the rest named as left out (`parse`). A branch
+keeps the list, a deleted thread forgets it, a list back at the defaults leaves
+the file. `SET_INJECTION` keeps `words`, `odds` and `prompt` -- each only when
+given -- against no revision; the snapshot's `injection` is the list, how each
+word reads and the note (`view`).
+
+- **The odds.** `_capture` puts the thread's entries on the request
+  (`ChatRequest.injection`) when its odds are on; `mc_llm_sessions._injected`
+  reads them into the answering server's tokens as the reply is sent
+  (`mc_llm_tokens.for_client`) and hands the client `logit_bias`. The vendored
+  client and the cache-saving one take the keyword (`request_bias`, a whitelist
+  as `REQUEST_SAMPLER_FIELDS` is; prompt_master/VENDORED_FROM.txt names it). Each
+  word is sent as written and with a capital, a space before each, and a word
+  made rarer or banned without the space too (`forms`): a boosted token with no
+  space joins onto other words, a penalised one is no danger there. Each form
+  is read by the server's tokenizer *after another token*
+  (`Counter.pieces`, `PIECE_CONTEXT`) -- a tokenizer that puts a space before
+  the start of a text answers for ` rain` alone with a lone space first -- and
+  a form it splits has its **first piece** changed alone: llama-server would
+  change every piece, and a piece like `estry` is inside other words. Two words
+  sharing a first piece add up within ±10; a ban wins. When the tokenizer cannot
+  be asked the forms are sent as text and the server reads them itself. Nothing
+  else carries them: not the cache update, not compaction, not the external API.
+- **The note.** `_window_extra` puts it after the summary and before the
+  emotion (`[Word choice]`: the words to use where they fit, the words to
+  avoid, and not to mention it), for every prompt the thread builds through
+  `_windowed` -- every reply, the cache update's read, the look ahead -- and
+  compaction's frame, so the cached front is the same for all of them. The
+  context reading's memo includes it. A change of the note (`SET_INJECTION`
+  compares it before and after) reads the conversation again in the background
+  (`ops.rewarm`); a change of the odds alone reads nothing.
+
+**The control vector** (`mc_llm_control_vector`). llama.cpp's
+`llama-cvector-generator` makes one from a model and two files of prompts. It
+is in none of llama.cpp's Windows release archives -- `tools/CMakeLists.txt`
+builds it only when `NOT GGML_BACKEND_DL`, and every release builds the
+backends as loadable libraries -- which the b10621 archives this extension
+installs confirm: twenty-one programs in the CUDA archive, twenty-two in the
+SYCL one, and not that one (read from each archive's central directory). And no
+program in them gives a model's per-layer hidden states, which making a vector
+needs: `imatrix` keeps squares, `results` keeps logits. So a vector is made
+elsewhere and added here; making one inside the extension waits on a generator
+the user can run.
+
+- **Read** (`read`): a GGUF of `direction.N` tensors, N from 1, each one row of
+  32-bit numbers, all the same width -- the loader's own rules
+  (`common_control_vector_load_one`), checked first because a vector llama-server
+  will not load stops the model starting. **Fits** (`fits`): its width the
+  model's `embedding_length`, no layer past `block_count`.
+- **Chosen** per model by its file name (`control_vector.json`): the vector, a
+  strength within ±8 (the generator's directions are unit length), and layers,
+  by default from about 30% in to the last (llama.cpp's README: better past the
+  first ten of thirty-two). `SET_CONTROL_VECTOR` chooses it against no revision.
+- **Given** as a copy written with the strength and the layers taken in
+  (`applied`: `control_vectors/applied/<digest>.gguf`, the digest of the file's
+  stamp and the choice), passed with `--control-vector` -- because
+  `--control-vector-scaled` splits `FILE:STRENGTH` at every colon and refuses
+  three parts, which a Windows path with its drive gives (`common/arg.cpp`). A
+  path with a comma, which the flag reads as a list, starts without it. The flag
+  is optional (`OPTIONAL_FLAGS`); a start that fails with it for anything but
+  memory sets the vector aside and starts again without it
+  (`set_aside_after_failure`), until it is chosen again.
+- **Applied**: a change stops the servers of that model when the broker says
+  nothing is being written (`mc_broker.llm_busy`), else a thread waits for that,
+  up to ten minutes, and the next request starts it with the new copy. The saved
+  prompt caches' identity includes the copy (`mc_llm_slot_cache.identity`'s
+  `steering`), left out when there is none so a server started as before keeps
+  its caches.
+- **Added**: an uploaded file is read as a vector before it is copied in, under
+  a name made safe and never over another.
+
+Nothing about a vector reaches a log by name: a vector's file name is the
+user's (the standing convention).
+
+**The menus.** LLM Studio's Conversation pop-up has an **Injection** section
+after Generation (`_injection_view` and the handlers after it): the words box,
+*Weigh the odds* and *Tell the model* (`input`, so the section being drawn
+never saves), how each word reads (escaped), Save words; then the vector's
+drop-down (one that does not fit marked so), Strength, From layer and To layer,
+*Add a vector file…*, Apply and where it stands; every control out of Forge's
+`ui-config.json`. Its label says what is in force, *· vector* once one is on or
+coming. The panel's is docs/22 §3.55.
+
+**Tests.** `tests/test_llm_injection.py` (the list, the forms, the odds, the
+note, the store; through the real service and builder: what a reply carries,
+the note before the emotion, in the cache update's request and compaction's
+frame, the meter counting it, the command, the snapshot, branch and delete; the
+reply resolving its words and the clients' bodies), `tests/test_llm_tokens.py`
+(pieces read after another token, remembered, read alone when the context does
+not stay whole), `tests/test_llm_control_vector.py` (the file, the fit, the
+choice, the copy, the flag, the set-aside, the runtime's start, the cache
+identity before and after, the stop when idle, adding a file, what the menus
+show), `tests/test_llm_studio_injection.py` (the handlers and the wiring) and
+three checks in `tests/live/llm_studio_conversation_live.py` on real Gradio
+4.40.0. Fifty-six mutations each fail one; three survived a first pass and their
+tests were tightened (the file read raw, the cache identity against the formula
+before the change, a switch that is not true or false). Not run against a real
+llama-server, with a real vector, or on the user's machine.

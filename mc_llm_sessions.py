@@ -685,6 +685,11 @@ class ChatRequest:
     chose. Sent after the model profile's, so a thread's choice wins; empty is
     the request as it always was, and a client is then called exactly as it
     always was."""
+    injection: tuple = ()
+    """The thread's injected words its reply weighs the odds with
+    (:mod:`mc_llm_injection`): its entries, read into tokens by the server the
+    reply goes to and sent as ``logit_bias``. Empty is the request as it always
+    was."""
 
 
 def _prefill(request: ChatRequest) -> str:
@@ -696,6 +701,28 @@ def _prefill(request: ChatRequest) -> str:
         return ""
     content = last.get("content")
     return content.strip() if isinstance(content, str) else ""
+
+
+def _injected(request: ChatRequest, client) -> dict:
+    """``{"logit_bias": [...]}`` for the thread's injected words, or ``{}``.
+
+    Asked only for a request that carries some, so a client from before the
+    keyword is called exactly as it always was. Never fails the reply: words
+    that cannot be read are a reply without them, and the console says so.
+    """
+    if not request.injection:
+        return {}
+    try:
+        import mc_llm_injection
+        import mc_llm_tokens
+
+        bias = mc_llm_injection.logit_bias(request.injection,
+                                           mc_llm_tokens.for_client(client))
+    except Exception:
+        logger.warning("Model Chain: this reply's injected words could not be read into "
+                       "tokens; it is written without them", exc_info=True)
+        return {}
+    return {"logit_bias": bias} if bias else {}
 
 
 def _conversation(request: ChatRequest, cancel: Cancellation):
@@ -729,6 +756,9 @@ def _conversation(request: ChatRequest, cancel: Cancellation):
         # are some, as ``save`` is below: a client from before the keyword, or a
         # thread that chose none, is called exactly as it always was.
         own_sampling = {"sampling": dict(request.sampling)} if request.sampling else {}
+        # The thread's injected words, read into this server's tokens now --
+        # the model that answers is the one whose tokens they have to be.
+        own_sampling.update(_injected(request, client))
         # A client that can save a conversation's cache is asked to, for a
         # request that says which conversation it is. Everything else -- a test
         # double, a server started without the folder, a reply with no

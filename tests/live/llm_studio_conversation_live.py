@@ -473,6 +473,42 @@ def main() -> int:
             context["meter after"] = page.evaluate(
                 f"() => (document.querySelector('{meter}') || {{}}).textContent || null")
             found["context"] = context
+
+            # Injection (mc_llm_injection, mc_llm_control_vector): two words saved,
+            # the section relabelled; "Tell the model" pressed keeps the box with
+            # it; the vector's part says where it stands and where vectors come from.
+            page.click("#mc-llm-chat-injection .label-wrap")
+            words = "#mc-llm-chat-injection-words textarea"
+            page.wait_for_selector(words, state="visible", timeout=10000)
+            page.fill(words, "rain +2\ndelve ban")
+            page.click("#mc-llm-chat-injection-save")
+            page.wait_for_function("""() => { const l = document.querySelector(
+                '#mc-llm-chat-injection .label-wrap span');
+                return l && l.textContent.trim() === 'Injection \u00b7 2 words \u00b7 odds'; }""",
+                                   timeout=10000)
+            injection = {
+                "saved label": page.evaluate(LABEL, "mc-llm-chat-injection"),
+                "read rows": page.evaluate("""() => [...document.querySelectorAll(
+                    '#mc-llm-chat-injection-read .mc-llm-injection-read > li')].map((li) =>
+                    li.textContent.trim())"""),
+                "said": page.evaluate("""() => document.querySelector(
+                    '#mc-llm-chat-status .mc-llm-notice').textContent"""),
+            }
+            page.click("#mc-llm-chat-injection-prompt input[type=checkbox]")
+            page.wait_for_function("""() => { const l = document.querySelector(
+                '#mc-llm-chat-injection .label-wrap span');
+                return l && l.textContent.includes('odds and prompt'); }""", timeout=10000)
+            injection["told label"] = page.evaluate(LABEL, "mc-llm-chat-injection")
+            injection["box kept"] = page.evaluate(f"() => document.querySelector('{words}').value")
+            injection["vector state"] = page.evaluate("""() => document.querySelector(
+                '#mc-llm-chat-vector-state').textContent""")
+            injection["vector controls"] = page.evaluate("""() => ['vector-choice',
+                'vector-strength', 'vector-first', 'vector-last', 'vector-add',
+                'vector-apply'].map((id) => !!document.querySelector('#mc-llm-chat-' + id))""")
+            import mc_llm_injection
+
+            injection["kept"] = [record.to_dict() for record in mc_llm_injection._read().values()]
+            found["injection"] = injection
             browser.close()
     finally:
         demo.close()
@@ -557,6 +593,21 @@ def main() -> int:
             (found.get("context", {}).get("trimmed") or "").startswith("Sending the latest 2 of")
             and bool(re.fullmatch(r"≈?[\d,]+ / [\d,]+",
                                   found.get("context", {}).get("meter after") or ""))),
+        "Save keeps the words with the thread and relabels Injection": (
+            found.get("injection", {}).get("saved label") == "Injection · 2 words · odds"
+            and [row.split()[0] for row in found.get("injection", {}).get("read rows", [])]
+            == ["rain", "delve"]
+            and (found.get("injection", {}).get("said") or "").startswith(
+                "2 words kept, weighing the odds")),
+        "Tell the model keeps the box with it": (
+            found.get("injection", {}).get("told label") == "Injection · 2 words · odds and prompt"
+            and found.get("injection", {}).get("box kept") == "rain +2\ndelve ban"
+            and found.get("injection", {}).get("kept") == [
+                {"words": "rain +2\ndelve ban", "odds": True, "prompt": True}]),
+        "the control vector's part is there and says where vectors come from": (
+            all(found.get("injection", {}).get("vector controls") or [False])
+            and "llama-cvector-generator" in (found.get("injection", {}).get("vector state")
+                                              or "")),
         "no script errors": not errors,
     }
     print(json.dumps({"checks": checks, "found": found, "errors": errors, "made": made}, indent=1))

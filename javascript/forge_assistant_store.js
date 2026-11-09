@@ -1414,6 +1414,35 @@
         return this.send(this.envelope("cancel_compact", {expected_revision: null}));
     };
 
+    /** The open thread's injected words (the server's mc_llm_injection): its
+     *  list, and whether its replies weigh the odds of them and its system
+     *  prompt tells the model them -- only what is given. Kept beside the
+     *  thread, so no revision is asked. */
+    Store.prototype.setInjection = function (values) {
+        const given = values || {};
+        const envelope = this.envelope("set_injection", {expected_revision: null});
+        const payload = {};
+        if (typeof given.words === "string") payload.words = given.words;
+        if (typeof given.odds === "boolean") payload.odds = given.odds;
+        if (typeof given.prompt === "boolean") payload.prompt = given.prompt;
+        envelope.payload = payload;
+        return this.send(envelope);
+    };
+
+    /** The language model's control vector (mc_llm_control_vector): a file's
+     *  name, or "" for none, with its strength. The model's, not the thread's;
+     *  named against the open thread, which asks for no revision. */
+    Store.prototype.setControlVector = function (vector, strength) {
+        const envelope = this.envelope("set_control_vector", {expected_revision: null});
+        const payload = {vector: String(vector || "")};
+        const number = Number(strength);
+        if (strength !== undefined && strength !== null && isFinite(number)) {
+            payload.strength = number;
+        }
+        envelope.payload = payload;
+        return this.send(envelope);
+    };
+
     /** Whether the open thread is being compacted: from the snapshot, and from
      *  the feed's `context` events while it lasts. */
     Store.prototype.compacting = function () {

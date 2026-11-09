@@ -236,7 +236,8 @@ def start(key, keep_tokens: int, summary_tokens: int) -> dict:
     character = ops._character(key.character)
     persona = ops._persona()
     extra = ops._window_extra(window, ops._emotion_note(ops._emotion_of(key), character,
-                                                        persona, ops._emotion_mode()))
+                                                        persona, ops._emotion_mode()),
+                              ops._injection_note(key))
     words = max(int(target * WORDS_PER_TOKEN), 40)
     asked = instruction(character, persona, words, bool(window.summary))
     wire = _wire(character, persona, extra, span, asked)

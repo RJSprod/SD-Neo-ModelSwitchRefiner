@@ -3712,6 +3712,70 @@ deleted message before the window keeps it on the same messages; **Delete from
 here** back into what a summary covers forgets the summary; a branch keeps the
 window and the summary of what it has.
 
+### Injection
+
+Words a thread's replies lean towards, and a push applied inside the model's
+layers: the Conversation pop-up's **Injection** section in LLM Studio, the ⋯
+menu's **Injection** submenu in the panel. Its label says what is in force
+(*Injection · 3 words · odds and prompt · vector*).
+
+**Words** are the thread's own, kept beside it (`injection.json` under the LLM
+data root, never in its file) and kept by a branch. One a line — commas part a
+line too — each with a strength after it if it wants one other than **+2**:
+`rain +3`, `tapestry -4`, `delve ban`. A strength needs its sign, a `:` or an
+`=` before it, so `Route 66` is a phrase. Sixty-four words at most. **Save
+words** keeps the box; each switch below keeps the box with it, so nothing
+typed is lost to a press. Two ways they steer, either or both:
+
+- **Weigh the odds** (on unless turned off) — llama-server's own `logit_bias`,
+  sent with every reply in the thread. Each time the model picks its next word a
+  listed word's chances go up by its strength — about 2.7 times as likely at +1,
+  7 times at +2, 20 times at +3 — or down for a negative one, and a banned word
+  is never picked. The model never reads the list: once a nudged word is out, it
+  carries on from it as if it had meant to say it. Nothing in the prompt
+  changes, so nothing is read again. It works on the model's tokens rather than
+  words: each word is sent as written and with a capital, after a space (and
+  without the space too for a word made rarer or banned, which catches it at the
+  start of a line or after an asterisk). A word the model's tokenizer splits
+  into pieces has its first piece changed alone — the list says so beside the
+  word, because that piece starts other words too. Short, common words that are
+  one piece behave best; too much strength puts a word in odd places, and the
+  thread's presence or repetition penalties push a word back down once used.
+- **Tell the model** (off unless turned on) — a note at the end of the thread's
+  system prompt, after any summary and before its emotion (*[Word choice]* —
+  the words to use where they fit, the words to avoid), in every request in the
+  thread. The model reads it, so it uses the words where they make sense. The
+  conversation is read again under a changed note in the background at once,
+  as after a change of emotion.
+
+The list says how each word reads against the running model's tokenizer, and
+that it will once the model runs.
+
+**Control vector** — the language model's, not the thread's: one direction per
+layer, added to the model's hidden state for everything it reads and writes,
+made from pairs of prompts that differ in one thing (happy against sad, terse
+against wordy). It pushes every reply on that model — every conversation, and
+every prompt it writes for the image side and Mini Paint NEO — without a word
+in the prompt. A vector is made for one model by llama.cpp's
+`llama-cvector-generator`, which none of llama.cpp's Windows release archives
+include (it is built only with the backends linked in, and every release links
+them dynamically), so a vector is made elsewhere, for the same model, and added
+with **Add a vector file…** (LLM Studio) or put in the `control_vectors` folder
+of the LLM data root. Each is checked against the model: a vector is one
+model's, by its width and its layers, and one that does not fit is listed as
+not fitting and cannot be chosen. **Strength** (−8 to 8; a vector from the
+generator is one unit long at each layer, and a negative strength pushes the
+other way), **From layer** and **To layer** (LLM Studio; by default from about a
+third of the way in to the last, as llama.cpp advises), then **Apply**: kept
+for the model by its file name, and the model is started again with it as soon
+as nothing is being written — every conversation is read in full at its next
+message. llama-server is given a copy written with the strength and the layers
+taken in (`--control-vector`), because `--control-vector-scaled` takes
+`FILE:STRENGTH` and a Windows path's drive already has a colon. A vector
+llama-server will not start with is set aside and the model started without
+it; the section says so until it is chosen again. A saved prompt cache is kept
+to the vector it was saved under.
+
 ### Who said what
 
 Every message carries a face: yours on the right of your messages, the

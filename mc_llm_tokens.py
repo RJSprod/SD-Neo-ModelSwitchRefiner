@@ -45,7 +45,17 @@ KEEP = 8192
 
 TIMEOUT = 5.0
 
+PIECE_CONTEXT = "*"
+"""What a word is read after when its pieces are asked for (:meth:`Counter.pieces`).
+
+A tokenizer that puts a space before the start of a text (SentencePiece's own,
+``add_space_prefix``) reads `` rain`` alone as two spaces and a word; after
+another token it reads it as it does inside a reply. An asterisk is a token of
+its own before a word in every vocabulary this was read against, with or
+without a space after it, so it never joins onto the word that follows."""
+
 _counts: OrderedDict = OrderedDict()
+_pieces: OrderedDict = OrderedDict()
 _lock = threading.Lock()
 
 
@@ -73,6 +83,19 @@ def forget() -> None:
     """Forget every count. For the tests."""
     with _lock:
         _counts.clear()
+        _pieces.clear()
+
+
+def _piece_text(piece) -> str:
+    """A piece as llama-server sends it: text, or its bytes when they are not UTF-8."""
+    if isinstance(piece, str):
+        return piece
+    if isinstance(piece, list):
+        try:
+            return bytes(int(item) & 0xFF for item in piece).decode("utf-8", "replace")
+        except (TypeError, ValueError):
+            return ""
+    return ""
 
 
 def estimate(text: str, ratio: float = 0.0) -> int:
@@ -149,6 +172,59 @@ class Counter:
         _remember(key, counted)
         return counted
 
+    def _tokens_of(self, content: str):
+        """``[(id, piece), ...]`` for ``content`` read as plain text, or None."""
+        try:
+            answer = self._post("/tokenize", {"content": content, "add_special": False,
+                                              "parse_special": False, "with_pieces": True})
+        except Exception as exc:
+            self._lost(exc)
+            return None
+        tokens = answer.get("tokens") if isinstance(answer, dict) else None
+        if not isinstance(tokens, list):
+            return None
+        found = []
+        for token in tokens:
+            if not isinstance(token, dict) or isinstance(token.get("id"), bool) \
+                    or not isinstance(token.get("id"), int):
+                return None
+            found.append((int(token["id"]), _piece_text(token.get("piece"))))
+        return found
+
+    def pieces(self, text: str):
+        """``text``'s tokens as the model reads them after another word, as
+        ``[(id, piece), ...]``; None with no server, or when it cannot say.
+
+        Read after :data:`PIECE_CONTEXT` and taken off it, so a tokenizer that
+        puts a space before the start of a text answers for the word as it is
+        inside a reply. Remembered per server and model, by a digest of the text.
+        """
+        text = text or ""
+        if self.client is None or not text:
+            return None
+        key = _digest(self.server, "\0pieces\0" + text)
+        with _lock:
+            found = _pieces.get(key)
+            if found is not None:
+                _pieces.move_to_end(key)
+                return list(found)
+        whole = self._tokens_of(PIECE_CONTEXT + text)
+        lead = self._tokens_of(PIECE_CONTEXT) if whole is not None else None
+        if whole is None or lead is None:
+            return None
+        if lead and whole[:len(lead)] == lead:
+            found = whole[len(lead):]
+        else:
+            found = self._tokens_of(text)
+            if found is None:
+                return None
+        with _lock:
+            _pieces[key] = tuple(found)
+            _pieces.move_to_end(key)
+            while len(_pieces) > KEEP:
+                _pieces.popitem(last=False)
+        return list(found)
+
     def message(self, text: str, still: bool = False) -> int:
         """One message's cost in a prompt: its text, its turn markers, and a
         picture it carries as a still."""
@@ -204,24 +280,34 @@ def for_server(ratio: float = 0.0) -> Counter:
     """A counter for the language model's server that is running, or one that
     estimates when none is. Starts nothing."""
     client = None
-    model = ""
     try:
         import mc_llm_sessions as sessions
 
         runtime = sessions._runtime_for("").runtime
         warm = getattr(runtime, "warm_client", None)
         client = warm(False) if callable(warm) else None
-        if client is not None:
-            import mc_llm_runtime
-
-            model = str(getattr(mc_llm_runtime.config(), "model", "") or "")
     except Exception:
         logger.debug("Model Chain: could not ask whether the language model is running",
                      exc_info=True)
         client = None
+    return for_client(client, ratio)
+
+
+def for_client(client, ratio: float = 0.0) -> Counter:
+    """A counter on ``client``'s server -- the one a request is about to go to --
+    or one that estimates when ``client`` is None."""
+    model = ""
+    if client is not None:
+        try:
+            import mc_llm_runtime
+
+            model = str(getattr(mc_llm_runtime.config(), "model", "") or "")
+        except Exception:
+            logger.debug("Model Chain: could not read which model is configured",
+                         exc_info=True)
     return Counter(client, model=hashlib.sha1(model.encode("utf-8", "replace")).hexdigest()
                    if model else "", ratio=ratio)
 
 
-__all__ = ["Counter", "ESTIMATE_RATIO", "MESSAGE_OVERHEAD", "estimate", "for_server",
-           "forget"]
+__all__ = ["Counter", "ESTIMATE_RATIO", "MESSAGE_OVERHEAD", "PIECE_CONTEXT", "estimate",
+           "for_client", "for_server", "forget"]

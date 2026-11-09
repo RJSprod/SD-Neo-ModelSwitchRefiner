@@ -4849,3 +4849,37 @@ compacting state; each action's call and what it says; the status line while
 compacting; the store's four envelopes, its feed held and the events applied.
 Four older menu tests gained the entry. Drawn in Chromium on the layout test
 page. Eight of docs/07 §50's mutations are in these files.
+
+## 3.55 Injection: the thread's words and the model's control vector (2026-11-09)
+
+> "Good, and I like all three options, give it a menu for "Injection""
+
+The words and the vector are the server's (`mc_llm_injection`,
+`mc_llm_control_vector`; docs/07 §51, the README's *Injection*). The panel shows
+them and keeps them:
+
+- **The entry** (`injectionItem`) follows Context in the ⋯ menu's Chat group,
+  saying how many words the thread has (*2 words*, *, off* when neither way uses
+  them; `injectionValue`), dark with no thread.
+- **The submenu** (`injectionItems`): the words box; *Weigh the odds* and *Tell
+  the model* as `menuitemcheckbox` rows (`injectionSwitch`), each pressed sending
+  the box with the way it toggles, so what was typed is kept by the press; Save
+  words; how each word reads (`injectionRead`, text nodes only -- the words are
+  the user's), what was left out, and that the words are read against the
+  model's tokenizer once it runs. Then the control vector (`vectorItems`): a
+  select of None and the folder's vectors, one that does not fit disabled with
+  its reason as its title, Strength as a range input, Apply (dark with no model),
+  where it stands (`data-state`), and where vectors come from. Its layers are LLM
+  Studio's to choose; Apply here keeps them as they are.
+- **The store** sends `set_injection` with only the fields given, each switch
+  only as true or false, and `set_control_vector` with the name ("" for none)
+  and the strength when it is a number, both against no revision
+  (`setInjection`, `setControlVector`). Each answer is said on the status line
+  and the snapshot read again (`injectionAction`, `vectorAction`,
+  `redrawInjection`).
+
+Tests: `tests/test_assistant_injection_js.py` (node) -- the entry and its
+value, the box and the two switches, a switch keeping what was typed, Save, a
+refusal said, how each word reads as plain text, the vector's select, Apply with
+its strength and with no model, the store's two envelopes. Three older menu tests
+gained the entry.

@@ -3485,6 +3485,57 @@
     gap: 0.5em;
 }
 
+/* The Injection section: how each word is read, and where the control vector
+   stands. Quiet text; a split word's sentence in the accent, being the one thing
+   in the list that may want doing something about. */
+#mc-llm-studio .mc-llm-injection-actions,
+#mc-llm-studio .mc-llm-vector-actions,
+#mc-llm-studio .mc-llm-vector-layers {
+    flex-wrap: wrap;
+    gap: 0.5em;
+}
+
+#mc-llm-studio .mc-llm-injection-read {
+    font-size: 0.9em;
+    list-style: none;
+    margin: 0.2em 0;
+    padding: 0;
+}
+
+#mc-llm-studio .mc-llm-injection-read > li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.2em 0.6em;
+    padding: 0.15em 0;
+}
+
+#mc-llm-studio .mc-llm-injection-strength {
+    font-variant-numeric: tabular-nums;
+    opacity: 0.75;
+}
+
+#mc-llm-studio .mc-llm-injection-split {
+    color: var(--color-accent, inherit);
+    flex-basis: 100%;
+    font-size: 0.9em;
+}
+
+#mc-llm-studio .mc-llm-injection-left,
+#mc-llm-studio .mc-llm-injection-later,
+#mc-llm-studio .mc-llm-vector-where {
+    font-size: 0.85em;
+    opacity: 0.75;
+}
+
+#mc-llm-studio .mc-llm-vector-state {
+    margin: 0.3em 0;
+}
+
+#mc-llm-studio .mc-llm-vector-state[data-state="set_aside"],
+#mc-llm-studio .mc-llm-vector-state[data-state="unusable"] {
+    color: var(--error-text-color, var(--color-accent, inherit));
+}
+
 /* Quiet by default. "Ready." is not news; a warning and an error keep the
    weight and the colour the notice rules give them. */
 #mc-llm-studio .mc-llm-chat-status .mc-llm-notice-info {
@@ -9673,6 +9724,113 @@
     opacity: 0.9;
     overflow-y: auto;
     white-space: pre-wrap;
+}
+
+/* The Injection submenu: the words box, its two ways, how each word reads,
+   then the control vector's choice and strength. The two ways are switches,
+   with the check in a column of their own as the ⋯ menu's are. */
+.forge-assistant-menu[data-which="injection"] .forge-assistant-injection-way {
+    position: relative;
+    padding-left: 2em;
+}
+
+.forge-assistant-injection-value {
+    font-size: 0.85em;
+    margin-left: auto;
+    opacity: 0.7;
+    white-space: nowrap;
+}
+
+.forge-assistant-injection-words {
+    background: var(--input-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    box-sizing: border-box;
+    color: inherit;
+    font: inherit;
+    line-height: 1.4;
+    margin: 0.3em 0.6em;
+    min-height: 5.5em;
+    padding: 0.4em 0.5em;
+    resize: vertical;
+    width: calc(100% - 1.2em);
+}
+
+.forge-assistant-injection-note {
+    font-size: 0.85em;
+    margin: 0.3em 0.6em;
+    opacity: 0.85;
+}
+
+.forge-assistant-injection-actions {
+    display: flex;
+    gap: 0.4em;
+    margin: 0.4em 0.6em;
+}
+
+.forge-assistant-injection-save,
+.forge-assistant-vector-apply {
+    background: transparent;
+    border: 1px solid var(--color-accent, #2563eb);
+    border-radius: 6px;
+    color: inherit;
+    cursor: pointer;
+    flex: 1 1 auto;
+    font: inherit;
+    font-weight: 600;
+    min-height: 2.2em;
+    padding: 0 0.9em;
+}
+
+.forge-assistant-vector-apply:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.forge-assistant-injection-read {
+    font-size: 0.85em;
+    list-style: none;
+    margin: 0.2em 0.6em 0.4em;
+    padding: 0;
+}
+
+.forge-assistant-injection-read > li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.15em 0.5em;
+    padding: 0.1em 0;
+}
+
+.forge-assistant-injection-strength {
+    font-variant-numeric: tabular-nums;
+    opacity: 0.75;
+}
+
+.forge-assistant-injection-split {
+    color: var(--color-accent, #2563eb);
+    flex-basis: 100%;
+}
+
+.forge-assistant-injection-left,
+.forge-assistant-injection-later {
+    opacity: 0.75;
+}
+
+.forge-assistant-vector-select {
+    background: var(--input-background-fill, transparent);
+    border: 1px solid var(--border-color-primary, #374151);
+    border-radius: 6px;
+    color: inherit;
+    font: inherit;
+    margin: 0.3em 0.6em;
+    min-height: 2.2em;
+    width: calc(100% - 1.2em);
+}
+
+.forge-assistant-vector-state[data-state="set_aside"],
+.forge-assistant-vector-state[data-state="unusable"] {
+    color: var(--error-text-color, var(--color-accent, #b91c1c));
+    opacity: 1;
 }
 
 .forge-assistant-status[data-kind="warn"] {
