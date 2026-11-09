@@ -793,8 +793,12 @@ class VoiceTurn:
 
         def watch():
             if not self.attached.wait(CLIENT_WAIT) and self.busy:
-                logger.debug("Model Chain: a Voice turn was cancelled — nothing connected "
-                             "to its audio stream")
+                # Said, not muttered (2026-11-09): days of replies went unspoken
+                # this way while model_chain.log showed only the engine being
+                # interrupted, because this line was a debug one.
+                logger.info("Model Chain: Voice turn %s was not read aloud — no page opened its "
+                            "audio within %d s, so the speech made for it was dropped",
+                            self.id[:8], int(CLIENT_WAIT))
                 self.cancel("no client")
                 self.drain_audio()
 

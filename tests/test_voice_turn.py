@@ -710,6 +710,34 @@ class TestTheClientWatchdog:
         assert turn.cancelled.is_set()
         assert turn.reason == "no client"
 
+    def test_a_turn_nobody_listens_to_says_so_in_the_log(self, caplog):
+        """Said at INFO, which is what reaches model_chain.log. It was a debug
+        line, and days of replies went unspoken with nothing in the log but the
+        engine being interrupted (2026-11-09)."""
+        import logging
+
+        speaker = Speaker()
+        turn = turns.create(sid=0, speaker=speaker)
+        original = turns.CLIENT_WAIT
+        turns.CLIENT_WAIT = 0.2
+        try:
+            with caplog.at_level(logging.INFO, logger="model_chain"):
+                turn.start()
+                turn.add_text("A sentence long enough to start synthesising something. ")
+                deadline = time.monotonic() + 3.0
+                while turn.busy and time.monotonic() < deadline:
+                    time.sleep(0.05)
+        finally:
+            turns.CLIENT_WAIT = original
+        said = [record for record in caplog.records
+                if "was not read aloud" in record.getMessage()]
+
+        assert len(said) == 1
+        assert said[0].levelno == logging.INFO
+        line = said[0].getMessage()
+        assert turn.id[:8] in line and "no page opened its audio" in line
+        assert "A sentence" not in line, "the reply's words are never in the log"
+
     def test_a_turn_with_a_listener_is_left_alone(self):
         speaker = Speaker()
         turn = turns.create(sid=0, speaker=speaker)

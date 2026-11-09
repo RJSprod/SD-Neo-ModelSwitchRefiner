@@ -2012,10 +2012,16 @@ def _perform(job: Job) -> None:
     job.started = _now()
     job.phase = WAITING
     job.reason = "asking for the card"
+    # Named by the engine alone. The turn's label is what the card's log lines,
+    # the image model's park and drop reasons and Mini Paint's lease purpose
+    # say, and a render's name is the user's: an output name typed or chosen,
+    # an LLM Studio render's the first words of its message, a design's its
+    # description (2026-11-09: those words were in model_chain.log). The render
+    # is named where it is drawn, on the Voice Box's own lanes.
     turn = _turns.request(job.card,
                           need_vram=int(engine.need_vram_bytes(model_id, takes=job.batch)),
                           need_ram=int(engine.need_ram_bytes(model_id)),
-                          label=f"{_label(engine)} — {job.name}",
+                          label=_label(engine),
                           guest=str(getattr(engine, "GUEST", "") or ""))
     made = None
     try:
@@ -2332,7 +2338,8 @@ def keep_design(identifier: str, title: str = "") -> dict:
                                "seed": found.design.get("seed"),
                                "cfg_scale": found.design.get("cfg_scale"),
                                "text": found.design.get("text")})
-    logger.info("Model Chain: Voice Box kept a designed voice as “%s”", entry["title"])
+    # Not by its title: a sample's name is the user's (2026-11-09).
+    logger.info("Model Chain: Voice Box kept a designed voice as a sample")
     return entry
 
 

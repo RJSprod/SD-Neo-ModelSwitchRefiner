@@ -17,7 +17,10 @@ on the ``model_chain`` logger every module logs through: any absolute path
 that reaches a record anyway -- in the message, in an argument, in a
 traceback -- is replaced by ``<path>`` before any handler sees it, so a line
 written next year cannot leak one either. The placeholder keeps the sentence
-readable and says that something was removed.
+readable and says that something was removed. The same filter keeps a library's
+line that a speech worker forwarded only up to its first opening quotation mark
+(:func:`unquote`): such a line is not this extension's to vouch for, and
+PocketTTS's own quotes the reply it is reading.
 
 A path is recognised by its shape, not by a list of this machine's folders:
 a drive letter and a separator (``C:\\...``), a UNC share (``\\\\host\\...``),
@@ -75,6 +78,41 @@ def redact(text: str) -> str:
     return text
 
 
+FORWARDED = re.compile(r"\b(?:DEBUG|INFO|WARNING|ERROR|CRITICAL):[A-Za-z_][\w.]*:")
+"""A line a worker's library wrote through Python's logging, in logging's
+default shape (``WARNING:pocket_tts.models.text_chunking:...``), which the
+worker's stderr carries into this log. Every speech worker's stderr is logged
+here, a line at a time."""
+
+_OPENING = re.compile(r"(?<![^\s(\[{:=,])[\"'“‘«]")
+"""A quotation mark that opens: at the start or after a space, a bracket, a
+colon, an equals sign or a comma -- never an apostrophe inside a word."""
+
+QUOTED = "…"
+
+
+def unquote(text: str) -> str:
+    """``text`` without what a library line forwarded from a worker quotes.
+
+    The worker's own lines say no word of anything spoken, and a library's are
+    not this extension's to vouch for: PocketTTS warns about a long chunk by
+    quoting it -- the start of the reply being read aloud, in the user's log
+    seven times in a day (2026-11-09). So a forwarded library line is kept up to
+    its first opening quotation mark, and what follows is :data:`QUOTED`. To the
+    end of the line, not to a closing mark, because the words quoted may hold
+    one of their own. Any other line is left exactly as it was.
+    """
+    if not text:
+        return text
+    found = FORWARDED.search(text)
+    if found is None:
+        return text
+    mark = _OPENING.search(text, found.end())
+    if mark is None:
+        return text
+    return text[:mark.start()] + QUOTED
+
+
 def _format_exception(exc_info) -> str:
     return "".join(traceback.format_exception(*exc_info)).rstrip("\n")
 
@@ -85,7 +123,7 @@ class NoPaths(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             message = record.getMessage()
-            cleaned = redact(message)
+            cleaned = unquote(redact(message))
             if cleaned != message or record.args:
                 record.msg = cleaned
                 record.args = ()

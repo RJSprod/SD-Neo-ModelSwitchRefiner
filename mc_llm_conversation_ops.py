@@ -500,7 +500,14 @@ def begin(envelope, scope: str) -> dict:
                                        "thread_id": operation.key.thread_id},
             "revision": plan["result_revision"],
             "target": {"index": operation.target_index, "kind": operation.target_kind,
-                       "version": operation.target_version}}
+                       "version": operation.target_version},
+            # The reply's speech turn, or "" when it is not to be spoken: what
+            # the page that asked opens the audio stream with. The tab is handed
+            # it in its follower's first frame; the Forge Assistant's panel
+            # reads it here (2026-11-09: until then nothing handed it to the
+            # panel, so every reply sent from it was synthesised for thirty
+            # seconds for nobody and dropped -- mc_voice_turn.CLIENT_WAIT).
+            "speech_turn_id": operation.speech_turn_id}
 
 
 def _fingerprint(store, key: Key) -> str:

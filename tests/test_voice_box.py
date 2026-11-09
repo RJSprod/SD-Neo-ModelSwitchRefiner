@@ -570,8 +570,10 @@ class TestRendering:
 
         job = settled(found["id"])
         assert job["phase"] == "done" and job["output_id"], job
+        # Under the engine's name alone: the render's ("Two lines") is the
+        # user's, and the turn's label is what the card's log lines say.
         assert turns.requests == [{"card": CARD, "need_vram": 20 * _GB, "need_ram": 3 * _GB,
-                                   "label": "VibeVoice 7B — Two lines",
+                                   "label": "VibeVoice 7B",
                                    "guest": "VibeVoice"}]
         assert turns.turn.finished == [None]
         assert runtime.loaded == [CARD] and len(runtime.renders) == 2

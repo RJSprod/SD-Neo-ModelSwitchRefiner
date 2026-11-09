@@ -645,6 +645,11 @@ globalThis.windowHandlers = windowHandlers;
 globalThis.addEventListener = (name, handler) => {
     (windowHandlers[name] = windowHandlers[name] || []).push(handler);
 };
+globalThis.removeEventListener = (name, handler) => {
+    const list = windowHandlers[name] || [];
+    const at = list.indexOf(handler);
+    if (at >= 0) list.splice(at, 1);
+};
 globalThis.console = Object.assign({}, console, {
     error(...args) { consoleErrors.push(args.map(String).join(" ")); },
     // Captured rather than printed. The playback and capture reports are the
@@ -5008,6 +5013,306 @@ class TestNoticingANewTurn:
         """, ANSWERS=stream_answers(seconds=0.2, count=2))
         opened = [r for r in found["requests"] if r["url"].endswith("tts-stream")]
         assert len(opened) == 1, opened
+
+
+def _streamed(found: dict) -> list[str]:
+    """The turn each audio stream the page opened was for, in order."""
+    return [json.loads(r["bodyText"])["turn"] for r in found["requests"]
+            if r["url"].endswith("tts-stream")]
+
+
+def _cancels(found: dict) -> list[dict]:
+    return [json.loads(r["bodyText"]) for r in found["requests"]
+            if r["url"].endswith("voice/cancel")]
+
+
+class TestATurnHandedOverByThePanel:
+    """The Forge Assistant's panel hands its replies' speech turns to the
+    facade (`followTurn`): nothing did until 2026-11-09, and every reply sent
+    from the panel was synthesised for thirty seconds for nobody and dropped --
+    "the voice chat TTS stops working and does not recover"."""
+
+    def test_its_stream_is_opened_and_played(self):
+        found = run("""
+            const taken = forgeAssistant.speech.followTurn("T1");
+            await tick(30);
+            console.log(JSON.stringify(report({taken})));
+        """, ANSWERS=stream_answers(seconds=0.2, count=2))
+
+        assert found["taken"] is True
+        assert _streamed(found) == ["T1"]
+        assert [item for item in found["scheduled"] if item["length"]]
+
+    def test_a_turn_handed_over_again_is_read_once(self):
+        """A send retried after a lost answer is answered with the same turn,
+        while it plays or after it has finished."""
+        found = run("""
+            forgeAssistant.speech.followTurn("T1");
+            await tick(30);
+            const again = forgeAssistant.speech.followTurn("T1");
+            await tick(10);
+            advanceAudio(60); NOW += 1000;
+            await tick(30);
+            const ended = requests.filter((r) => (r.url || "").endsWith("voice/telemetry")).length;
+            const late = forgeAssistant.speech.followTurn("T1");
+            await tick(30);
+            console.log(JSON.stringify(report({again, ended, late})));
+        """, ANSWERS=stream_answers(seconds=0.2, count=2))
+
+        assert found["again"] is True and found["late"] is True
+        assert found["ended"] == 1, "the first reading had not finished; this proves nothing"
+        assert [row["playback_end_reason"] for row in _playbacks(found)] == ["finished"]
+        assert _streamed(found) == ["T1"]
+
+    def test_nothing_to_follow_is_refused(self):
+        found = run("""
+            const taken = [forgeAssistant.speech.followTurn(""),
+                           forgeAssistant.speech.followTurn(null),
+                           forgeAssistant.speech.followTurn("   ")];
+            await tick(10);
+            console.log(JSON.stringify(report({taken})));
+        """)
+
+        assert found["taken"] == [False, False, False]
+        assert _streamed(found) == []
+
+    def test_it_does_not_wake_the_tab_s_last_turn(self):
+        """The tab's hidden field still holds the last reply the tab spoke, and
+        the poll compares it with what it last saw there. A turn from the panel
+        is not something the field said: the poll must not take the field's old
+        value for news and speak that reply again over the panel's."""
+        found = run("""
+            await speak("OLD");
+            advanceAudio(5);
+            await pump(10);
+            forgeAssistant.speech.followTurn("T2");
+            await pump(20);
+            console.log(JSON.stringify(report()));
+        """, ANSWERS=stream_answers(seconds=0.2, count=2, headers=ANY_TURN))
+
+        assert _streamed(found) == ["OLD", "T2"]
+
+    def test_the_panel_hears_when_a_reply_starts_and_stops_being_read(self):
+        """The panel's Stop stays up for as long as a reply is read aloud, which
+        is longer than it is written; it hears that through `subscribeSpeech`."""
+        found = run("""
+            const seen = [];
+            forgeAssistant.speech.subscribeSpeech((state) => seen.push(state.playing));
+            forgeAssistant.speech.followTurn("T1");
+            await tick(30);
+            const reading = seen[seen.length - 1];
+            forgeAssistant.speech.stopPlayback({origin: "any"});
+            await tick(4);
+            console.log(JSON.stringify({seen, reading}));
+        """, ANSWERS=stream_answers(seconds=0.2, count=2, stall=True))
+
+        assert found["seen"][0] is False
+        assert found["reading"] is True
+        assert found["seen"][-1] is False
+
+
+# A context the browser will not let start yet: `resume()` neither resolves nor
+# rejects -- what the Web Audio specification asks for, and what Chromium and
+# Firefox do -- until the scenario grants it, and then it starts.
+LOCKED = """
+let granted = false;
+context.resume = () => {
+    if (!granted) return new Promise(() => {});
+    context.state = "running";
+    return Promise.resolve();
+};
+function streams() {
+    return requests.filter((r) => (r.url || "").indexOf("tts-stream") !== -1).length;
+}
+function listening(name) { return (windowHandlers[name] || []).length; }
+const before = {pointerdown: listening("pointerdown"), touchend: listening("touchend"),
+                keydown: listening("keydown")};
+"""
+
+
+class TestAReplyTheBrowserHoldsBack:
+    """A reply can reach a page the browser has not yet let make a sound. It
+    used to wait on a `resume()` that never answers -- the speaker marked busy,
+    nothing opened, until the server gave up on the turn -- or, where the
+    browser did answer, to be cancelled outright. It waits for the page to be
+    used now, and the first tap plays it."""
+
+    def test_it_waits_for_a_tap_and_the_tap_plays_it(self):
+        found = run(LOCKED + """
+            forgeAssistant.speech.followTurn("T1");
+            await tick(4);
+            const asking = {streams: streams(), status: report().status};
+            NOW += 1600;
+            await tick(8);
+            const waiting = {streams: streams(), status: report().status,
+                             listening: listening("pointerdown") - before.pointerdown};
+            granted = true;
+            fireWindow("pointerdown", {});
+            await tick(30);
+            console.log(JSON.stringify(report({asking, waiting,
+                listeningAfter: listening("pointerdown") - before.pointerdown})));
+        """, CONTEXT_STATE='"suspended"', ANSWERS=stream_answers(seconds=0.2, count=2))
+
+        assert found["asking"]["streams"] == 0
+        assert found["waiting"]["streams"] == 0
+        assert "tap anywhere on the page" in found["waiting"]["status"]
+        assert found["waiting"]["listening"] == 1
+        assert _streamed(found) == ["T1"]
+        assert [item for item in found["scheduled"] if item["length"]]
+        assert found["listeningAfter"] == 0, "the page went on listening for taps"
+        assert _cancels(found) == []
+
+    def test_the_tab_s_own_reply_waits_the_same_way(self):
+        found = run(LOCKED + """
+            turnField.value = "T1";
+            await pump(4);
+            NOW += 1600;
+            await pump(4);
+            const waiting = {streams: streams(), status: report().status};
+            granted = true;
+            fireWindow("keydown", {key: "a"});
+            await pump(20);
+            console.log(JSON.stringify(report({waiting})));
+        """, CONTEXT_STATE='"suspended"', ANSWERS=stream_answers(seconds=0.2, count=2))
+
+        assert found["waiting"]["streams"] == 0
+        assert "tap anywhere on the page" in found["waiting"]["status"]
+        assert _streamed(found) == ["T1"]
+
+    def test_a_finger_s_press_waits_for_its_release(self):
+        """A mouse and a key grant the page its sound as they go down; a finger
+        grants it as it lifts. A press that does not grant it leaves the wait in
+        place for the release that does."""
+        found = run(LOCKED + """
+            forgeAssistant.speech.followTurn("T1");
+            await tick(4);
+            NOW += 1600;
+            await tick(8);
+            fireWindow("pointerdown", {pointerType: "touch"});
+            await tick(8);
+            const pressed = {streams: streams(),
+                             listening: listening("touchend") - before.touchend};
+            granted = true;
+            fireWindow("touchend", {});
+            await tick(30);
+            console.log(JSON.stringify(report({pressed})));
+        """, CONTEXT_STATE='"suspended"', ANSWERS=stream_answers(seconds=0.2, count=2))
+
+        assert found["pressed"] == {"streams": 0, "listening": 1}
+        assert _streamed(found) == ["T1"]
+
+    def test_a_wait_nobody_ends_is_given_up_before_the_server_gives_up(self):
+        """Counted from the reply's arrival, not from the moment the page began
+        waiting for a tap: the server's own patience began before either."""
+        found = run(LOCKED + """
+            forgeAssistant.speech.followTurn("T1");
+            await tick(4);
+            NOW += 1600;
+            await tick(8);
+            NOW += 23500;
+            await tick(8);
+            granted = true;
+            fireWindow("pointerdown", {});
+            await tick(20);
+            console.log(JSON.stringify(report({
+                listening: listening("pointerdown") - before.pointerdown})));
+        """, CONTEXT_STATE='"suspended"', ANSWERS=stream_answers(seconds=0.2, count=2))
+
+        assert _streamed(found) == [], "a tap after the wait started a reply the server dropped"
+        assert _cancels(found) == [{"turn": "T1", "reason": "audio is locked until a gesture"}]
+        assert found["listening"] == 0
+        assert "tap Conversation or the microphone" in found["status"], (
+            "the status line still promised that a tap would play a reply that is gone")
+
+    def test_a_tap_the_browser_refuses_leaves_the_wait_in_place(self):
+        """A browser may answer a resume it will not grant with a refusal
+        rather than silence. That is not a stream that failed: the next tap is
+        still the one that plays it."""
+        found = run(LOCKED + """
+            let refusals = 0;
+            context.resume = () => {
+                if (refusals > 0) {
+                    refusals -= 1;
+                    return Promise.reject(new Error("NotAllowedError"));
+                }
+                if (!granted) return new Promise(() => {});
+                context.state = "running";
+                return Promise.resolve();
+            };
+            forgeAssistant.speech.followTurn("T1");
+            await tick(4);
+            NOW += 1600;
+            await tick(8);
+            refusals = 1;
+            fireWindow("pointerdown", {});
+            await tick(8);
+            const refused = {asked: refusals === 0, streams: streams(), status: report().status,
+                             listening: listening("pointerdown") - before.pointerdown};
+            granted = true;
+            fireWindow("pointerdown", {});
+            await tick(30);
+            console.log(JSON.stringify(report({refused})));
+        """, CONTEXT_STATE='"suspended"', ANSWERS=stream_answers(seconds=0.2, count=2))
+
+        assert found["refused"]["asked"] is True, "the tap never asked the browser"
+        assert found["refused"]["streams"] == 0
+        assert found["refused"]["listening"] == 1
+        assert "could not read it aloud" not in found["refused"]["status"]
+        assert _streamed(found) == ["T1"]
+        assert _cancels(found) == []
+
+    def test_the_wait_ends_inside_the_server_s_own(self):
+        """The server keeps a turn nobody opened for `CLIENT_WAIT` from its
+        first sentence; a tap the page still listened for after that would open
+        a turn that is gone."""
+        import mc_voice_turn
+
+        source = SCRIPT.read_text()
+        waited = int(re.search(r"const TAP_WAIT_MS = (\d+);", source).group(1))
+
+        assert waited < mc_voice_turn.CLIENT_WAIT * 1000
+
+    def test_stop_while_it_waits_means_no_tap_starts_it(self):
+        found = run(LOCKED + """
+            forgeAssistant.speech.followTurn("T1");
+            await tick(4);
+            NOW += 1600;
+            await tick(8);
+            forgeAssistant.speech.stopPlayback({origin: "any"});
+            const afterStop = listening("pointerdown") - before.pointerdown;
+            granted = true;
+            fireWindow("pointerdown", {});
+            await tick(20);
+            console.log(JSON.stringify(report({afterStop,
+                listening: listening("pointerdown") - before.pointerdown})));
+        """, CONTEXT_STATE='"suspended"', ANSWERS=stream_answers(seconds=0.2, count=2))
+
+        assert _streamed(found) == []
+        assert found["afterStop"] == 0, "Stop left the page listening for taps"
+        assert found["listening"] == 0
+        assert {"turn": "T1", "reason": "any"} in _cancels(found)
+
+    def test_a_reply_replaced_while_the_browser_is_asked_is_never_opened(self):
+        """The next reply arrives while the first is still waiting on the
+        browser. When the browser lets the page sound, only the reply that is
+        still the one to speak opens its stream."""
+        found = run("""
+            const answers = [];
+            context.resume = () => new Promise((resolve) => answers.push(() => {
+                context.state = "running";
+                resolve();
+            }));
+            forgeAssistant.speech.followTurn("T1");
+            await tick(2);
+            forgeAssistant.speech.followTurn("T2");
+            await tick(2);
+            answers.forEach((answer) => answer());
+            await tick(30);
+            console.log(JSON.stringify(report()));
+        """, CONTEXT_STATE='"suspended"',
+            ANSWERS=stream_answers(seconds=0.2, count=2, headers=ANY_TURN))
+
+        assert _streamed(found) == ["T2"]
 
 
 class TestTheStartupBuffer:

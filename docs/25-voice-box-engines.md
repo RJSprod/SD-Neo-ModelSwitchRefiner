@@ -100,6 +100,15 @@ name the guest by its label — *Waiting for Breeze TTS 2 on the RTX 3090 — th
 generation starts when it is done* — and its settings are worded for the Voice
 Box rather than for VibeVoice. The broker's voice family is called *Voice Box*.
 
+A render asks for its card under the engine's label alone (`_label(engine)`),
+not *engine — render name* as it did until 2026-11-09: the turn's label is what
+`mc_turns`' log lines, the image model's park and drop reasons and Mini Paint's
+lease purpose say, and a render's name is the user's -- an output name, an LLM
+Studio render's the first words of its message, a design's its description --
+which put those words in `model_chain.log`. A render is named where it is drawn,
+on the Voice Box's lanes. Keeping a design no longer logs the name it was kept
+under either (`tests/test_voice_box_breeze.py`, `TestNothingOfTheUsersInTheLog`).
+
 ---
 
 ## 3. Settings, configurations and outputs

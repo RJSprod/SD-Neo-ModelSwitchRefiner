@@ -489,6 +489,92 @@ class TestStop:
         assert completion.auto_speech_owner_page == ""
 
 
+class _Turn:
+    """A speech turn as the reply sees one: an id, text in, an end."""
+
+    id = "turn-from-the-server"
+    busy = False
+
+    def __init__(self):
+        self.text = []
+
+    def add_text(self, text):
+        self.text.append(text)
+
+    def complete(self, *args, **kwargs):
+        pass
+
+    def cancel(self, reason=""):
+        pass
+
+
+class TestTheAnswerCarriesTheSpeechTurn:
+    """The page that asked for a reply is the one that opens its audio, and the
+    Forge Assistant's panel learns the reply's turn from its command's answer:
+    nothing else hands it over. Until 2026-11-09 nothing did, and every reply
+    sent from the panel was synthesised for thirty seconds for nobody and
+    dropped ("the voice chat TTS stops working and does not recover")."""
+
+    def test_an_accepted_reply_answers_with_its_speech_turn(self, thread, monkeypatch):
+        import mc_voice_ui
+
+        monkeypatch.setattr(mc_voice_ui, "begin_speech", lambda **kw: _Turn())
+        replies(monkeypatch)
+
+        outcome = run("send", thread, payload={"text": "a question"})
+
+        assert outcome["ok"] is True
+        assert outcome["speech_turn_id"] == "turn-from-the-server"
+
+    def test_a_reply_not_to_be_spoken_answers_with_no_turn(self, thread, monkeypatch):
+        import mc_voice_ui
+
+        asked = []
+        monkeypatch.setattr(mc_voice_ui, "begin_speech",
+                            lambda **kw: asked.append(kw) or _Turn())
+        replies(monkeypatch)
+
+        outcome = run("send", thread, payload={"text": "a question", "voice": False})
+
+        assert outcome["ok"] is True
+        assert outcome["speech_turn_id"] == ""
+        assert asked == [], "a reply asked for with voice off made a speech turn"
+
+    def test_a_reply_voice_chat_will_not_speak_answers_with_no_turn(self, thread,
+                                                                     monkeypatch):
+        """``begin_speech`` says no -- Speak replies automatically off, no
+        models -- and the answer says so, rather than naming nothing at all."""
+        import mc_voice_ui
+
+        monkeypatch.setattr(mc_voice_ui, "begin_speech", lambda **kw: None)
+        replies(monkeypatch)
+
+        outcome = run("send", thread, payload={"text": "a question"})
+
+        assert outcome["speech_turn_id"] == ""
+
+    def test_a_command_sent_again_is_answered_with_the_same_turn(self, thread, monkeypatch):
+        """A send whose answer was lost is sent again with the same id, and the
+        second answer is the only one that page ever reads: it has to name the
+        turn too."""
+        import mc_voice_ui
+
+        made = []
+        monkeypatch.setattr(mc_voice_ui, "begin_speech",
+                            lambda **kw: made.append(_Turn()) or made[-1])
+        replies(monkeypatch)
+        from test_conversation_service import envelope
+
+        body = envelope("send", thread, payload={"text": "a question"})
+        first = service.submit(dict(body))
+        again = service.submit(dict(body))
+        assert ops.drain(timeout=10)
+
+        assert again["duplicate"] is True
+        assert again["speech_turn_id"] == first["speech_turn_id"] == "turn-from-the-server"
+        assert len(made) == 1, "the second send made a second speech turn"
+
+
 class TestTheCompletionGuard:
     def test_a_reply_is_not_written_into_a_conversation_that_moved(self, chats, thread,
                                                                    monkeypatch):
