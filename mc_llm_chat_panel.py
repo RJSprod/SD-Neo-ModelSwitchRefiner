@@ -110,6 +110,7 @@ import gradio as gr
 
 import mc_llm_attachments
 import mc_llm_compact
+import mc_llm_control_vector
 import mc_llm_format
 import mc_llm_generation
 import mc_llm_overlays
@@ -740,6 +741,68 @@ def build() -> dict:
                                     setting, initial_generation[setting.key])
                 generation_reset = gr.Button("Reset to defaults", size="sm",
                                              elem_id=ui.ident("chat", "generation-reset"))
+            # Words this thread's replies lean towards, two ways, and the model's
+            # control vector (mc_llm_injection, mc_llm_control_vector; 2026-11-09:
+            # "a word injection into the mind of the LLM ... I like all three
+            # options, give it a menu for 'Injection'"). The words are the
+            # thread's and kept when saved or when a switch is pressed; the
+            # vector is the model's, kept on Apply, and the model starts again
+            # with it. Its label says what is in force.
+            initial_injection = _injection_record(who, initial_thread)
+            initial_vector = _vector_view()
+            with gr.Accordion(_injection_label(who, initial_thread), open=False,
+                              elem_id=ui.ident("chat", "injection"),
+                              elem_classes=ui.classes("section")) as injection_section:
+                injection_words = gr.Textbox(
+                    value=initial_injection.words, label="Words", lines=4, max_lines=12,
+                    placeholder="rain +2\nlantern\ntapestry -4\ndelve ban",
+                    info="One a line. A strength after a word: +2 if none, -4 to make it "
+                         "rarer, ban to never use it.",
+                    elem_id=ui.ident("chat", "injection-words"))
+                with gr.Row(elem_classes=ui.classes("injection-switches")):
+                    injection_odds = gr.Checkbox(
+                        value=initial_injection.odds, label="Weigh the odds",
+                        info="The model never sees the list: its words just come up more often.",
+                        elem_id=ui.ident("chat", "injection-odds"))
+                    injection_prompt = gr.Checkbox(
+                        value=initial_injection.prompt, label="Tell the model",
+                        info="A note at the end of its system prompt, read again at once.",
+                        elem_id=ui.ident("chat", "injection-prompt"))
+                with gr.Row(elem_classes=ui.classes("injection-actions")):
+                    injection_save = gr.Button("Save words", size="sm", scale=0, min_width=104,
+                                               variant="primary",
+                                               elem_id=ui.ident("chat", "injection-save"))
+                injection_read = gr.HTML(_injection_read(who, initial_thread),
+                                         elem_id=ui.ident("chat", "injection-read"))
+                gr.Markdown("##### Control vector", elem_classes=ui.classes("sheet-label"))
+                vector_choice = gr.Dropdown(**_vector_choices(initial_vector), label="Vector",
+                                            elem_id=ui.ident("chat", "vector-choice"))
+                vector_strength = gr.Slider(
+                    minimum=-mc_llm_control_vector.STRENGTH_LIMIT,
+                    maximum=mc_llm_control_vector.STRENGTH_LIMIT, step=0.05,
+                    value=initial_vector.get("strength", mc_llm_control_vector.DEFAULT_STRENGTH),
+                    label="Strength", info="Negative pushes the other way.",
+                    elem_id=ui.ident("chat", "vector-strength"))
+                with gr.Row(elem_classes=ui.classes("vector-layers")):
+                    vector_first = gr.Slider(**_layer_slider(initial_vector, "first_layer"),
+                                             label="From layer",
+                                             elem_id=ui.ident("chat", "vector-first"))
+                    vector_last = gr.Slider(**_layer_slider(initial_vector, "last_layer"),
+                                            label="To layer",
+                                            elem_id=ui.ident("chat", "vector-last"))
+                with gr.Row(elem_classes=ui.classes("vector-actions")):
+                    vector_add = gr.UploadButton("Add a vector file\u2026", size="sm", scale=0,
+                                                 min_width=150, file_types=[".gguf"],
+                                                 file_count="single",
+                                                 elem_id=ui.ident("chat", "vector-add"))
+                    vector_apply = gr.Button("Apply", size="sm", scale=0, min_width=88,
+                                             variant="primary",
+                                             elem_id=ui.ident("chat", "vector-apply"))
+                vector_state = gr.HTML(_vector_said(initial_vector),
+                                       elem_id=ui.ident("chat", "vector-state"))
+                for control in (injection_words, injection_odds, injection_prompt, vector_choice,
+                                vector_strength, vector_first, vector_last):
+                    control.do_not_save_to_config = True
             # Voice: what is ready, and its two switches (mc_voice_ui.section).
             voice = mc_voice_ui.section()
 
@@ -825,6 +888,10 @@ def build() -> dict:
     # The Context section and the meter: what ``_context_view`` answers.
     context_drawn = [context_section, context_info, context_keep, context_summary,
                      context_cancel, context_meter]
+    # The Injection section: what ``_injection_view`` answers.
+    injection_drawn = [injection_section, injection_words, injection_odds, injection_prompt,
+                       injection_read, vector_choice, vector_strength, vector_first,
+                       vector_last, vector_state]
     # The State first, then one visibility per surface: the order
     # :func:`_screens` answers in. The tail is the surfaces this panel does not
     # own and closes anyway -- see :mod:`mc_llm_overlays`. It is built from the
@@ -862,6 +929,8 @@ def build() -> dict:
                           outputs=generation_drawn, queue=False)
     to_conversation.click(fn=_context_view, inputs=[character, thread_state],
                           outputs=context_drawn, queue=False)
+    to_conversation.click(fn=_injection_view, inputs=[character, thread_state],
+                          outputs=injection_drawn, queue=False)
     to_conversation.click(fn=_emotion_view, inputs=[character, thread_state],
                           outputs=emotions_drawn, queue=False)
     to_conversation.click(fn=_start_view, inputs=[character, thread_state],
@@ -918,6 +987,31 @@ def build() -> dict:
     generation_reset.click(fn=_generation_reset, inputs=[character, thread_state],
                            outputs=generation_drawn + [status], queue=False)
 
+    # -- the thread's injected words, and the model's control vector ---------- #
+    #
+    # Save keeps the box; a switch keeps the box with it, so what was typed is
+    # never lost to a press. A change of what the system prompt says reads the
+    # conversation again in the background, said quietly on the status line as
+    # the emotion's is. The vector is kept on Apply, which starts the model
+    # again with it as soon as nothing is being written.
+    injection_inputs = [character, thread_state, injection_words, injection_odds,
+                        injection_prompt]
+    saved = injection_save.click(fn=_injection_saved, inputs=injection_inputs,
+                                 outputs=injection_drawn + [status], queue=False)
+    saved.then(fn=_cache_status, inputs=[character, thread_state], outputs=[status],
+               show_progress="hidden")
+    for control in (injection_odds, injection_prompt):
+        switched_way = control.input(fn=_injection_saved, inputs=injection_inputs,
+                                     outputs=injection_drawn + [status], queue=False)
+        switched_way.then(fn=_cache_status, inputs=[character, thread_state],
+                          outputs=[status], show_progress="hidden")
+    vector_apply.click(fn=_vector_applied,
+                       inputs=[character, thread_state, vector_choice, vector_strength,
+                               vector_first, vector_last],
+                       outputs=injection_drawn + [status], queue=False)
+    vector_add.upload(fn=_vector_added, inputs=[character, thread_state, vector_add],
+                      outputs=injection_drawn + [status], queue=False)
+
     # -- the thread's context window ----------------------------------------- #
     #
     # The meter is asked for again by the page whenever the status line changes
@@ -970,11 +1064,15 @@ def build() -> dict:
     pressed.then(fn=_favourites_section, outputs=[favourites_section], queue=False)
     pressed.then(fn=_context_view, inputs=[character, thread_state], outputs=context_drawn,
                  queue=False)
+    pressed.then(fn=_injection_view, inputs=[character, thread_state],
+                 outputs=injection_drawn, queue=False)
     search.change(fn=_thread_rows, inputs=[character, search, thread_state],
                   outputs=[threads], queue=False)
     made = new_thread.click(fn=_new_thread, inputs=[character, search],
                             outputs=[threads, thread_state] + view + screens, queue=False)
     made.then(fn=_context_view, inputs=[character, thread_state], outputs=context_drawn,
+              queue=False)
+    made.then(fn=_injection_view, inputs=[character, thread_state], outputs=injection_drawn,
               queue=False)
     removed = delete.click(fn=_delete_thread,
                            inputs=[character, thread_state, search, revision_state],
@@ -988,6 +1086,8 @@ def build() -> dict:
                  outputs=generation_drawn, queue=False)
     removed.then(fn=_context_view, inputs=[character, thread_state], outputs=context_drawn,
                  queue=False)
+    removed.then(fn=_injection_view, inputs=[character, thread_state],
+                 outputs=injection_drawn, queue=False)
     removed.then(fn=_emotion_view, inputs=[character, thread_state], outputs=emotions_drawn,
                  queue=False)
     removed.then(fn=_start_view, inputs=[character, thread_state], outputs=starts_drawn,
@@ -1036,6 +1136,8 @@ def build() -> dict:
                   outputs=generation_drawn, queue=False)
     switched.then(fn=_context_view, inputs=[character, thread_state], outputs=context_drawn,
                   queue=False)
+    switched.then(fn=_injection_view, inputs=[character, thread_state],
+                  outputs=injection_drawn, queue=False)
     edit_character.click(fn=_open_character, inputs=[character], outputs=editor, queue=False)
     new_character.click(fn=_new_character, outputs=editor, queue=False)
     refresh_characters.click(fn=_refresh_characters, inputs=[character],
@@ -2117,6 +2219,191 @@ def _generation_reset(who, identifier) -> list:
             ui.notice("The settings could not be reset.", "error")]
     return _generation_view(who, identifier) + [
         ui.notice("This thread is back to its defaults.")]
+
+
+# -- injected words, and the control vector ---------------------------------------- #
+#
+# The words are kept with the thread (mc_llm_injection) and read where every
+# request in it is built; the vector is the model's (mc_llm_control_vector).
+# These handlers only show what is kept and keep what is pressed.
+
+
+def _injection_record(who, identifier):
+    """What the thread keeps; the defaults for none, or when it cannot be read."""
+    import mc_llm_injection
+
+    if not who or not identifier:
+        return mc_llm_injection.Record()
+    try:
+        return mc_llm_injection.for_thread(who, identifier)
+    except Exception:
+        logger.debug("Model Chain: could not read this thread's injected words", exc_info=True)
+        return mc_llm_injection.Record()
+
+
+def _injection_label(who, identifier) -> str:
+    import mc_llm_injection
+
+    label = mc_llm_injection.label(_injection_record(who, identifier))
+    vector = _vector_view()
+    if vector.get("vector") and vector.get("state") in ("on", "next_start", "waiting"):
+        label += " \u00b7 vector"
+    return label
+
+
+def _injection_read(who, identifier) -> str:
+    """How each word is read, as HTML: its strength, and a sentence when the
+    model's tokenizer splits it. Words are the user's, so every one is escaped."""
+    import html as html_module
+
+    import mc_llm_injection
+    import mc_llm_tokens
+
+    if not who or not identifier:
+        return ""
+    try:
+        view = mc_llm_injection.view(who, identifier, mc_llm_tokens.for_server())
+    except Exception:
+        logger.debug("Model Chain: could not read how a thread's words are read", exc_info=True)
+        return ""
+    rows = []
+    for entry in view["entries"]:
+        note = (f'<span class="mc-llm-injection-split">{html_module.escape(entry["note"])}'
+                "</span>") if entry["note"] else ""
+        rows.append(f'<li><span class="mc-llm-injection-word">'
+                    f'{html_module.escape(entry["word"])}</span> '
+                    f'<span class="mc-llm-injection-strength">'
+                    f'{html_module.escape(entry["strength"])}</span>{note}</li>')
+    for left in view["left_out"]:
+        rows.append(f'<li class="mc-llm-injection-left">Left out: '
+                    f"{html_module.escape(left)}</li>")
+    if not rows:
+        return ""
+    said = ("" if view["read"] else
+            '<p class="mc-llm-injection-later">Each word is read against the model\'s '
+            "tokenizer once the model is running.</p>")
+    return f'<ul class="mc-llm-injection-read">{"".join(rows)}</ul>{said}'
+
+
+def _vector_view() -> dict:
+    """The model's control vector as the menus show it; an empty answer when it
+    cannot be read."""
+    try:
+        return mc_llm_control_vector.view()
+    except Exception:
+        logger.debug("Model Chain: could not read the control vector", exc_info=True)
+        return {"vectors": [], "vector": "", "strength": mc_llm_control_vector.DEFAULT_STRENGTH,
+                "first_layer": 1, "last_layer": 1, "layers": 0, "state": "unavailable",
+                "said": "The control vector could not be read.", "folder": ""}
+
+
+def _vector_choices(view) -> dict:
+    """The Vector dropdown's choices and value: None, then every file in the
+    folder, one that does not fit this model marked so."""
+    choices = [("None", "")]
+    for vector in view.get("vectors") or ():
+        label = vector["name"] if vector.get("fits") else f'{vector["name"]} (does not fit)'
+        choices.append((label, vector["name"]))
+    value = view.get("vector") or ""
+    if value not in {choice[1] for choice in choices}:
+        value = ""
+    return {"choices": choices, "value": value}
+
+
+def _layer_slider(view, which: str) -> dict:
+    top = max(int(view.get("layers") or 0) - 1, 1)
+    value = min(max(int(view.get(which) or 1), 1), top)
+    return {"minimum": 1, "maximum": top, "step": 1, "value": value}
+
+
+def _vector_said(view) -> str:
+    """Where the vector stands, and where vectors come from."""
+    import html as html_module
+
+    where = view.get("folder") or "the control_vectors folder"
+    return (f'<p class="mc-llm-vector-state" data-state="{html_module.escape(view.get("state") or "")}">'
+            f'{html_module.escape(view.get("said") or "")}</p>'
+            '<p class="mc-llm-vector-where">For every conversation on this model, and every '
+            "prompt it writes. A vector is made for one model by llama.cpp's "
+            "llama-cvector-generator, which its Windows builds do not include: make one "
+            f"elsewhere and add it here, or put it in {html_module.escape(where)}.</p>")
+
+
+def _injection_view(who, identifier) -> list:
+    """The section's label and every control, in ``injection_drawn``'s order."""
+    record = _injection_record(who, identifier)
+    vector = _vector_view()
+    return [gr.update(label=_injection_label(who, identifier)), record.words, record.odds,
+            record.prompt, _injection_read(who, identifier),
+            gr.update(**_vector_choices(vector)),
+            vector.get("strength", mc_llm_control_vector.DEFAULT_STRENGTH),
+            gr.update(**_layer_slider(vector, "first_layer")),
+            gr.update(**_layer_slider(vector, "last_layer")), _vector_said(vector)]
+
+
+def _injection_saved(who, identifier, words, odds, prompt) -> list:
+    """Keep the box and both switches for the open thread."""
+    import mc_llm_conversation_service as service
+
+    if not who or not identifier:
+        return _injection_view(who, identifier) + [
+            ui.notice("Choose a character and a thread first.", "warn")]
+    outcome = _command(service.SET_INJECTION, who, identifier,
+                       payload={"words": words or "", "odds": bool(odds),
+                                "prompt": bool(prompt)})
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return _injection_view(who, identifier) + [ui.notice(note, kind)]
+    kept = outcome.get("injection") or {}
+    count = len(kept.get("entries") or ())
+    if not count:
+        said = "No injected words in this thread."
+    else:
+        ways = [way for way, on in (("weighing the odds", kept.get("odds")),
+                                    ("telling the model", kept.get("prompt"))) if on]
+        said = (f"{count} word{'' if count == 1 else 's'} kept, "
+                + (" and ".join(ways) if ways else "used neither way") + ".")
+    return _injection_view(who, identifier) + [ui.notice(said)]
+
+
+def _vector_applied(who, identifier, vector, strength, first, last) -> list:
+    """Keep the model's control vector, its strength and its layers."""
+    import mc_llm_conversation_service as service
+
+    if not who or not identifier:
+        return _injection_view(who, identifier) + [
+            ui.notice("Choose a character and a thread first.", "warn")]
+    payload = {"vector": vector or ""}
+    for name, value in (("strength", strength), ("first_layer", first),
+                        ("last_layer", last)):
+        if value is not None:
+            payload[name] = float(value) if name == "strength" else int(value)
+    outcome = _command(service.SET_CONTROL_VECTOR, who, identifier, payload=payload)
+    if not outcome.get("ok"):
+        note, kind = _refused(outcome)
+        return _injection_view(who, identifier) + [ui.notice(note, kind)]
+    said = (outcome.get("control_vector") or {}).get("said") or "Kept."
+    return _injection_view(who, identifier) + [ui.notice(said)]
+
+
+def _vector_added(who, identifier, upload) -> list:
+    """Copy an uploaded file into the vectors folder when it is a control vector."""
+    path = getattr(upload, "name", None) or (upload if isinstance(upload, str) else None)
+    if not path:
+        return _injection_view(who, identifier) + [gr.update()]
+    original = getattr(upload, "orig_name", "") or ""
+    try:
+        kept = mc_llm_control_vector.add(path, original)
+    except mc_llm_control_vector.Refused as refusal:
+        return _injection_view(who, identifier) + [
+            ui.notice(f"That file was not added: {refusal}", "warn")]
+    except OSError:
+        logger.warning("Model Chain: a control vector could not be copied into its folder",
+                       exc_info=True)
+        return _injection_view(who, identifier) + [
+            ui.notice("That file could not be copied into the vectors folder.", "error")]
+    return _injection_view(who, identifier) + [
+        ui.notice(f"Added {kept}. Choose it and press Apply.")]
 
 
 # -- the context window ---------------------------------------------------------- #

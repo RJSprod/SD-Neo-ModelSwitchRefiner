@@ -136,12 +136,24 @@ CLEAR_WINDOW = "clear_window"
 newest messages that fit again."""
 CANCEL_COMPACT = "cancel_compact"
 """Stop the thread's compaction. Nothing is kept of it."""
+SET_INJECTION = "set_injection"
+"""This thread's injected words (:mod:`mc_llm_injection`): ``words``, its list,
+``odds``, whether its replies weigh the odds of them, and ``prompt``, whether its
+system prompt tells the model them -- each only when given. Kept beside the
+thread, so it asks for no revision and changes none; a change of what the
+system prompt says reads the conversation again under it in the background."""
+SET_CONTROL_VECTOR = "set_control_vector"
+"""The control vector the language model is started with (:mod:`mc_llm_control_vector`):
+``vector``, a file's name or empty for none, its ``strength`` and its layers,
+``first_layer`` and ``last_layer``. The model's, not the thread's: named against
+a thread like the emotion's way, it asks for no revision and changes none. The
+model is started again with it when nothing is being written."""
 
 ACTIONS = (CREATE_THREAD, SEND, EDIT_MESSAGE, REGENERATE, CONTINUE, RESEND_FROM_USER,
            BRANCH, SELECT_VERSION, DROP_VERSION, DELETE_MESSAGE, DELETE_FROM,
            RENAME_THREAD, SET_RESPONSE_PREFIX, DELETE_THREAD, RESTORE_TO_DRAFT, STOP,
            SET_EMOTION, SET_START_WITH, SET_EMOTION_MODE, SET_WINDOW, COMPACT, CLEAR_WINDOW,
-           CANCEL_COMPACT)
+           CANCEL_COMPACT, SET_INJECTION, SET_CONTROL_VECTOR)
 """Every command, and nothing else is one.
 
 Adding to this tuple is a compatible change; renaming anything in it is not,
@@ -372,7 +384,8 @@ def _expected(raw, action: str):
     """
     if raw is None:
         if action in (CREATE_THREAD, STOP, SET_EMOTION, SET_START_WITH, SET_EMOTION_MODE,
-                      SET_WINDOW, COMPACT, CLEAR_WINDOW, CANCEL_COMPACT):
+                      SET_WINDOW, COMPACT, CLEAR_WINDOW, CANCEL_COMPACT, SET_INJECTION,
+                      SET_CONTROL_VECTOR):
             return None
         raise Refused(INVALID_INPUT, "expected_revision is required.")
     if not isinstance(raw, dict):
@@ -432,6 +445,27 @@ def _payload(raw, action: str) -> dict:
         found["emotion_mode"] = _text(raw.get("emotion_mode"), "emotion_mode", 64)
     if "start_with" in raw:
         found["start_with"] = _text(raw.get("start_with"), "start_with", 16 * 1024)
+    if "words" in raw:
+        found["words"] = _text(raw.get("words"), "words", 16 * 1024)
+    for name in ("odds", "prompt"):
+        if name in raw:
+            if not isinstance(raw.get(name), bool):
+                raise Refused(INVALID_INPUT, f"{name} must be true or false.")
+            found[name] = raw.get(name)
+    if "vector" in raw:
+        found["vector"] = _text(raw.get("vector"), "vector", 512)
+    if "strength" in raw:
+        strength = raw.get("strength")
+        if isinstance(strength, bool) or not isinstance(strength, (int, float)) \
+                or strength != strength or abs(strength) > 1000:
+            raise Refused(INVALID_INPUT, "strength must be a number.")
+        found["strength"] = float(strength)
+    for name in ("first_layer", "last_layer"):
+        if name in raw:
+            layer = raw.get(name)
+            if isinstance(layer, bool) or not isinstance(layer, int) or not 0 <= layer <= 10_000:
+                raise Refused(INVALID_INPUT, f"{name} must be a layer number.")
+            found[name] = layer
     for name in ("keep_tokens", "summary_tokens"):
         if name in raw:
             count = raw.get(name)
@@ -719,6 +753,10 @@ def _dispatch(envelope: Envelope, scope: str) -> dict:
         return _set_emotion_mode(envelope)
     if envelope.action in (SET_WINDOW, COMPACT, CLEAR_WINDOW, CANCEL_COMPACT):
         return _window_command(envelope)
+    if envelope.action == SET_INJECTION:
+        return _set_injection(envelope)
+    if envelope.action == SET_CONTROL_VECTOR:
+        return _set_control_vector(envelope)
     if envelope.action in GENERATING:
         import mc_llm_conversation_ops as ops
 
@@ -951,8 +989,10 @@ def _delete_thread(envelope: Envelope) -> dict:
     mc_llm_emotions.forget(key.character, key.thread_id)
     mc_llm_start_with.forget(key.character, key.thread_id)
     mc_llm_generation.forget(key.character, key.thread_id)
+    import mc_llm_injection
     import mc_llm_window
 
+    mc_llm_injection.forget(key.character, key.thread_id)
     mc_llm_window.forget(key.character, key.thread_id)
     publish(THREAD_DELETED, key)
     return _accepted(envelope, key, 0)
@@ -987,6 +1027,63 @@ def _set_emotion(envelope: Envelope) -> dict:
         ops.rewarm(key)
     publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="emotion")
     return _accepted(envelope, key, revision, extra={"emotion": chosen})
+
+
+def _set_injection(envelope: Envelope) -> dict:
+    """Keep this thread's injected words and how they steer. Writes nothing in the
+    thread; its revision is answered back unchanged.
+
+    The odds are no part of any prompt, so a change of them alone reads nothing
+    again. A change of what the system prompt says is a new front for every
+    later prompt in the thread, and the conversation is read again under it in
+    the background at once, as a change of emotion is.
+    """
+    import mc_llm_injection
+    import mc_llm_tokens
+
+    store = chats()
+    key = envelope.conversation
+    conversation, raw = store_module.read(store, key)
+    before = mc_llm_injection.note_for(key.character, key.thread_id)
+    given = {name: envelope.payload[name] for name in ("words", "odds", "prompt")
+             if name in envelope.payload}
+    try:
+        mc_llm_injection.save(key.character, key.thread_id, **given)
+    except mc_llm_injection.Refused as refusal:
+        raise Refused(INVALID_INPUT, str(refusal))
+    revision = store_module.token_of(conversation, raw)
+    if mc_llm_injection.note_for(key.character, key.thread_id) != before:
+        import mc_llm_conversation_ops as ops
+
+        ops.rewarm(key)
+    publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="injection")
+    return _accepted(envelope, key, revision, extra={
+        "injection": mc_llm_injection.view(key.character, key.thread_id,
+                                           mc_llm_tokens.for_server())})
+
+
+def _set_control_vector(envelope: Envelope) -> dict:
+    """Choose the language model's control vector. Writes nothing in the thread.
+
+    Kept for the model the language model is configured with; the server is
+    started again with it as soon as nothing is being written, and the answer
+    says whether that has happened yet.
+    """
+    import mc_llm_control_vector
+
+    store = chats()
+    key = envelope.conversation
+    conversation, raw = store_module.read(store, key)
+    payload = envelope.payload
+    try:
+        outcome = mc_llm_control_vector.choose(
+            payload.get("vector", None), strength=payload.get("strength"),
+            first_layer=payload.get("first_layer"), last_layer=payload.get("last_layer"))
+    except mc_llm_control_vector.Refused as refusal:
+        raise Refused(INVALID_INPUT, str(refusal))
+    revision = store_module.token_of(conversation, raw)
+    publish(CONVERSATION_CHANGED, key, revision=revision, kind_detail="control_vector")
+    return _accepted(envelope, key, revision, extra={"control_vector": outcome})
 
 
 def _set_emotion_mode(envelope: Envelope) -> dict:
@@ -1165,6 +1262,10 @@ def _branch_from(store, key: Key, expected, index: int, operation_id: str,
 
     mc_llm_emotions.carry(key.character, key.thread_id, committed.conversation.identifier)
     mc_llm_generation.carry(key.character, key.thread_id, committed.conversation.identifier)
+    # The words it leaned towards, too (mc_llm_injection).
+    import mc_llm_injection
+
+    mc_llm_injection.carry(key.character, key.thread_id, committed.conversation.identifier)
     # And as much of its context window as still describes it: a summary of
     # messages the branch has, the start the window had among them.
     import mc_llm_window
@@ -1236,6 +1337,8 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
     found["emotions"] = _emotions()
     found["emotion_mode"] = _emotion_mode()
     found["context"] = _context_of(key)
+    found["injection"] = _injection_of(key)
+    found["control_vector"] = _control_vector_view()
     found["messages"] = [_message_view(index, message)
                          for index, message in enumerate(conversation.messages)]
 
@@ -1249,6 +1352,30 @@ def snapshot(character: str, thread_id: str, selection_epoch: str = "",
         found["operation"] = running.describe()
     found["recovery"] = [item.describe() for item in ops.recoverable(key)]
     return found
+
+
+def _injection_of(key: Key):
+    """This thread's injected words as the menus show them (``mc_llm_injection.view``),
+    read into the running model's tokens when one runs; None when it cannot be said."""
+    try:
+        import mc_llm_injection
+        import mc_llm_tokens
+
+        return mc_llm_injection.view(key.character, key.thread_id, mc_llm_tokens.for_server())
+    except Exception:
+        logger.debug("Model Chain: could not read a thread's injected words", exc_info=True)
+        return None
+
+
+def _control_vector_view():
+    """The language model's control vector as the menus show it, or None."""
+    try:
+        import mc_llm_control_vector
+
+        return mc_llm_control_vector.view()
+    except Exception:
+        logger.debug("Model Chain: could not read the control vector", exc_info=True)
+        return None
 
 
 def _context_of(key: Key):

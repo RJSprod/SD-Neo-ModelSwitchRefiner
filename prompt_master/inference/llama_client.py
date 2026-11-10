@@ -33,6 +33,31 @@ def request_sampling(sampling: dict | None) -> dict:
             and not isinstance(sampling[key], bool)}
 
 
+def request_bias(logit_bias) -> dict:
+    """``{"logit_bias": [...]}`` for a request, or ``{}``.
+
+    llama-server's own field: ``[token, strength]`` pairs, the token an id or a
+    text the server reads itself, the strength a number or ``False`` for never.
+    Anything else in the list is left out, for the reason the sampler fields are
+    a whitelist. A thread's injected words (``mc_llm_injection`` in the
+    extension around this package) are the only caller.
+    """
+    found = []
+    for pair in logit_bias or ():
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        token, strength = pair
+        if isinstance(token, bool) or not isinstance(token, (int, str)):
+            continue
+        if isinstance(token, str) and not token:
+            continue
+        if strength is False or (isinstance(strength, (int, float))
+                                 and not isinstance(strength, bool)
+                                 and strength == strength and abs(strength) < float("inf")):
+            found.append([token, strength])
+    return {"logit_bias": found} if found else {}
+
+
 class LlamaClient:
     """A client for the local llama-server, and for nothing else.
 
@@ -59,7 +84,7 @@ class LlamaClient:
         self.sampling = {key: sampling[key] for key in SAMPLER_FIELDS
                          if sampling and key in sampling and sampling[key] is not None}
 
-    def stream_chat(self, messages: list[dict], max_tokens: int, seed: int, on_text: Callable[[str], None], cancel: threading.Event | None = None, temperature: float = 0.85, top_p: float = 0.95, sampling: dict | None = None) -> str:
+    def stream_chat(self, messages: list[dict], max_tokens: int, seed: int, on_text: Callable[[str], None], cancel: threading.Event | None = None, temperature: float = 0.85, top_p: float = 0.95, sampling: dict | None = None, logit_bias: list | None = None) -> str:
         # Before the body is built, so an image llama-server would have had to
         # fetch never reaches a request at all. See local_only.check_messages.
         check_messages(messages)
@@ -70,6 +95,7 @@ class LlamaClient:
         # A request's own sampler fields after the profile's: a conversation
         # thread's choice of top-k beats the catalogue's (REQUEST_SAMPLER_FIELDS).
         payload.update(request_sampling(sampling))
+        payload.update(request_bias(logit_bias))
         pieces = []
         with httpx.Client(timeout=httpx.Timeout(600, connect=10), headers={"Authorization":f"Bearer {self.api_key}"}) as client:
             with client.stream("POST", f"{self.base_url}/v1/chat/completions", json=payload) as response:

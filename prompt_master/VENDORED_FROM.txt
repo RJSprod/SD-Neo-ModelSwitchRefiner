@@ -51,5 +51,6 @@ The exception, kept as small as the extension could make it: a few keyword
 arguments and helpers the extension needs from the chat builder and the client,
 each additive and defaulting to upstream's behaviour -- chat/prompt.py's
 system_extra, trim and system_message, its stills_carried, and
-inference/llama_client.py's REQUEST_SAMPLER_FIELDS. `git log` on those two files
+inference/llama_client.py's REQUEST_SAMPLER_FIELDS and request_bias
+(stream_chat's logit_bias). `git log` on those two files
 names each change and why; a re-copy has to carry them forward.

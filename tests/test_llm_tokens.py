@@ -149,3 +149,106 @@ class TestForTheRunningServer:
 
         assert counter.exact is False and counter.client is None
         assert runtime.asked == [False]
+
+
+class PieceServer:
+    """``/tokenize`` with pieces, for a tokenizer that puts a space before the
+    start of a text, as SentencePiece's own does: ``" rain"`` alone reads as a
+    lone space and the word, after another token as the word."""
+
+    base_url, api_key = "http://127.0.0.1:1", "k"
+
+    def __init__(self, prefix_space=True):
+        self.asked = []
+        self.prefix_space = prefix_space
+
+    def post(self, route, body):
+        self.asked.append((route, body))
+        assert route == "/tokenize" and body["with_pieces"] is True
+        assert body["add_special"] is False and body["parse_special"] is False
+        text = body["content"]
+        if self.prefix_space:
+            text = " " + text
+        found = []
+        for index, word in enumerate(text.replace("*", " * ").split(" ")):
+            if word == "" and index == 0 and self.prefix_space:
+                found.append({"id": 1, "piece": " "})
+            elif word:
+                found.append({"id": 100 + sum(map(ord, word)), "piece": " " + word})
+        return {"tokens": found}
+
+
+class TestPiecesOfAWord:
+    def counter(self, server):
+        counter = tokens.Counter(server, model="m")
+        counter._post = server.post
+        return counter
+
+    def test_a_word_is_read_after_another_token_so_a_leading_space_is_not_a_piece(self):
+        server = PieceServer(prefix_space=True)
+
+        found = self.counter(server).pieces(" rain")
+
+        assert [piece for _, piece in found] == [" rain"]
+        assert [body["content"] for _, body in server.asked] == [
+            tokens.PIECE_CONTEXT + " rain", tokens.PIECE_CONTEXT]
+
+    def test_pieces_are_remembered_per_server_and_model(self):
+        server = PieceServer()
+        counter = self.counter(server)
+
+        counter.pieces(" rain")
+        counter.pieces(" rain")
+        assert len(server.asked) == 2
+
+        other = tokens.Counter(server, model="another")
+        other._post = server.post
+        other.pieces(" rain")
+        assert len(server.asked) == 4
+
+    def test_when_the_context_does_not_stay_whole_the_word_is_read_alone(self):
+        class Merging(PieceServer):
+            def post(self, route, body):
+                self.asked.append((route, body))
+                if body["content"] == tokens.PIECE_CONTEXT:
+                    return {"tokens": [{"id": 9, "piece": "*"}]}
+                if body["content"].startswith(tokens.PIECE_CONTEXT):
+                    return {"tokens": [{"id": 77, "piece": "*rain"}]}
+                return {"tokens": [{"id": 5, "piece": "rain"}]}
+
+        found = self.counter(Merging()).pieces("rain")
+
+        assert found == [(5, "rain")]
+
+    def test_a_piece_that_is_not_text_is_read_from_its_bytes(self):
+        class Bytes(PieceServer):
+            def post(self, route, body):
+                if body["content"] == tokens.PIECE_CONTEXT:
+                    return {"tokens": [{"id": 9, "piece": "*"}]}
+                return {"tokens": [{"id": 9, "piece": "*"},
+                                   {"id": 3, "piece": [0xC3, 0xA9]}]}
+
+        assert self.counter(Bytes()).pieces("é") == [(3, "é")]
+
+    def test_with_no_server_or_a_server_that_fails_there_are_no_pieces(self):
+        assert tokens.Counter(None).pieces(" rain") is None
+
+        class Failing(PieceServer):
+            def post(self, route, body):
+                raise ConnectionError("gone")
+
+        counter = self.counter(Failing())
+        assert counter.pieces(" rain") is None
+        assert counter.exact is False
+
+    def test_for_client_names_the_model_the_way_for_server_does(self, monkeypatch):
+        import mc_llm_runtime
+
+        monkeypatch.setattr(mc_llm_runtime, "config", lambda role="": type(
+            "Config", (), {"model": "/models/gemma.gguf"})())
+        server = PieceServer()
+
+        made = tokens.for_client(server)
+
+        assert made.exact is True and made.server.startswith(server.base_url + "|")
+        assert tokens.for_client(None).exact is False

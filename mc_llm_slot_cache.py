@@ -231,18 +231,24 @@ def launch_flags(configuration, full_cache: bool = False,
 
 
 def identity(runtime, model, projector, full_cache: bool, cache_types: str = "",
-             template=None) -> str:
+             template=None, steering=None) -> str:
     """Which server a saved cache belongs to, as twelve hex digits.
 
     Each file part is a path, size and modification time, so a replaced build,
     a re-downloaded model, a different projector or a different chat template
     is a different identity and its files are simply never offered to the new
     one. ``template`` is the ``--chat-template-file`` the start was given, if
-    any: the template decides every token of every prompt.
+    any: the template decides every token of every prompt. ``steering`` is the
+    control vector it was given, if any (:mod:`mc_llm_control_vector`): the
+    vector is in every number the cache holds, so a cache saved with one is no
+    cache for a server with another or none. Left out of the identity when
+    there is none, so a server started as before keeps the caches it had.
     """
     parts = [_stamp(runtime), _stamp(model), _stamp(projector),
              "full" if full_cache else "window", str(cache_types or "default"),
              _stamp(template or None)]
+    if steering:
+        parts.append("steering:" + _stamp(steering))
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
@@ -731,7 +737,8 @@ def client(base_url: str, api_key: str, sampling, server: Server):
 
 def _define_client():
     import httpx
-    from prompt_master.inference.llama_client import LlamaClient, request_sampling
+    from prompt_master.inference.llama_client import (LlamaClient, request_bias,
+                                                      request_sampling)
     from prompt_master.inference.local_only import check_messages
     from prompt_master.inference.sse import assistant_chunks
 
@@ -749,7 +756,7 @@ def _define_client():
             self.saved_caches = server
 
         def request_body(self, messages, max_tokens, seed, temperature, top_p,
-                         sampling=None) -> dict:
+                         sampling=None, logit_bias=None) -> dict:
             payload = {"model": "prompt-master", "messages": messages,
                        "temperature": temperature, "top_p": top_p,
                        "max_tokens": max_tokens, "seed": seed, "stream": True,
@@ -759,23 +766,29 @@ def _define_client():
             # The thread's own choices after the profile's, as the vendored
             # client puts them (mc_llm_generation).
             payload.update(request_sampling(sampling))
+            # The thread's injected words (mc_llm_injection), as the vendored
+            # client puts them.
+            payload.update(request_bias(logit_bias))
             return payload
 
         def stream_conversation(self, conversation, messages, max_tokens, seed, on_text,
                                 cancel=None, temperature=0.85, top_p=0.95,
-                                save: bool = True, sampling=None) -> str:
+                                save: bool = True, sampling=None, logit_bias=None) -> str:
             """``save`` false: restore as usual, but keep no file of this reply's
             slot -- a reply started from the thread's emotion, whose cache holds a
             line no later prompt has (:mod:`mc_llm_cache_update` saves after it).
-            ``sampling``: the thread's own sampler fields (:mod:`mc_llm_generation`)."""
+            ``sampling``: the thread's own sampler fields (:mod:`mc_llm_generation`);
+            ``logit_bias``: its injected words (:mod:`mc_llm_injection`)."""
             server = self.saved_caches
             if not conversation or server is None or not active():
                 extra = {"sampling": sampling} if sampling else {}
+                if logit_bias:
+                    extra["logit_bias"] = logit_bias
                 return self.stream_chat(messages, max_tokens, seed, on_text, cancel,
                                         temperature=temperature, top_p=top_p, **extra)
             check_messages(messages)
             payload = self.request_body(messages, max_tokens, seed, temperature, top_p,
-                                        sampling)
+                                        sampling, logit_bias)
             pinned = server.restore(conversation, dict(payload))
             payload.update(slot_fields(pinned))
             found: dict = {}
