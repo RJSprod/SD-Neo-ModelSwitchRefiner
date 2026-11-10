@@ -112,6 +112,7 @@ class Job:
     status: str = "Waiting…"
     written: int = 0
     started: float = field(default_factory=time.monotonic)
+    worker: object = None
 
     def describe(self) -> dict:
         return {"phase": self.phase, "status": self.status, "written": self.written,
@@ -157,11 +158,25 @@ def cancel(key) -> bool:
     return True
 
 
+RESET_WAIT_SECONDS = 5.0
+"""How long :func:`reset` waits for each stopped compaction to end."""
+
+
 def reset() -> None:
-    """Forget every compaction. For the tests."""
+    """Forget every compaction, once each has been stopped and has ended. For the
+    tests: a compaction still running when its test has gone keeps its summary in
+    whatever data folder is current by then -- the checkout's, once the test's
+    own folder has been put back (a full run of 2026-11-10 found a window.json
+    there)."""
     with _lock:
-        for job in _jobs.values():
-            job.cancel.cancel()
+        running = list(_jobs.values())
+    for job in running:
+        job.cancel.cancel()
+    for job in running:
+        worker = job.worker
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(RESET_WAIT_SECONDS)
+    with _lock:
         _jobs.clear()
         _outcomes.clear()
 
@@ -252,6 +267,7 @@ def start(key, keep_tokens: int, summary_tokens: int) -> dict:
     _publish(key, job)
     worker = threading.Thread(target=_run, args=(key, job, wire, counter.prompt(wire)[0]),
                               name="model-chain-compact", daemon=True)
+    job.worker = worker
     worker.start()
     return {"messages": len(span), "tokens": tokens, "target": target, "cut": cut}
 

@@ -470,6 +470,31 @@ class TestCompact:
         assert outcome["error"]["code"] == service.THREAD_BUSY
         assert "being compacted" in outcome["error"]["message"]
 
+    def test_reset_waits_for_a_running_compaction_to_end(self, chats, quick_turn):
+        """``reset`` stops a compaction and waits for its thread. One left running
+        past its test keeps its summary in whatever data folder is current by then
+        -- the checkout's, once the test's own has been put back: a full run of
+        2026-11-10 found window.json there, from the test above."""
+        import threading
+
+        conversation = long_thread(chats, exchanges=5, reply=600)
+        started = threading.Event()
+
+        def hold(cancel):
+            started.set()
+            cancel.wait(5)
+            time.sleep(0.3)  # still ending when a reset that does not wait returns
+
+        compacted(conversation, quick_turn, Writer(hold=hold), wait=False)
+        assert started.wait(5)
+        key = store_module.Key(character="Ada", thread_id=conversation.identifier)
+        job = compact._jobs[compact._name(key)]
+
+        compact.reset()
+
+        assert not job.worker.is_alive()
+        assert window_module.for_thread("Ada", conversation.identifier).summary == ""
+
     def test_cancel_keeps_nothing(self, chats, quick_turn):
         import threading
 
