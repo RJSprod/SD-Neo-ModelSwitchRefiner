@@ -1,11 +1,11 @@
-"""LLM Studio's Injection section: the thread's words and the model's control vector.
+"""LLM Studio's Injection section: the thread's words.
 
-"I like all three options, give it a menu for 'Injection'" (2026-11-09). The
-section in the Conversation pop-up keeps the thread's words when Save or a
-switch is pressed -- a switch keeps the box with it, so nothing typed is lost to
-a press -- says how each word reads, and keeps the model's control vector on
-Apply. ``tests/live/llm_studio_conversation_live.py`` drives it on a real Gradio
-4.40 page; these hold the handlers and the wiring.
+"I like all three options, give it a menu for 'Injection'" (2026-11-09); then,
+of the third, "No vector support". The section in the Conversation pop-up keeps
+the thread's words when Save or a switch is pressed -- a switch keeps the box
+with it, so nothing typed is lost to a press -- and says how each word reads.
+``tests/live/llm_studio_conversation_live.py`` drives it on a real Gradio 4.40
+page; these hold the handlers and the wiring.
 """
 
 from __future__ import annotations
@@ -14,14 +14,11 @@ import pytest
 
 import mc_llm_chat_panel as chat
 import mc_llm_compact as compact
-import mc_llm_control_vector as cv
 import mc_llm_conversation_ops as ops
 import mc_llm_conversation_service as service
 import mc_llm_conversation_store as store_module
 import mc_llm_injection as injection
 import mc_llm_paths
-import mc_llm_runtime
-from test_llm_control_vector import Config, model_file
 from test_llm_panels import _built, _by_id
 
 
@@ -33,8 +30,6 @@ def store(tmp_path, monkeypatch, host):
     store_module.registry.reset()
     ops.reset()
     compact.reset()
-    cv._given.clear()
-    cv._set_aside.clear()
     from prompt_master.chat.characters import Character, CharacterStore
 
     CharacterStore(tmp_path / "characters").save(Character(name="Ada",
@@ -55,15 +50,6 @@ def thread(store):
     conversation.append(ASSISTANT, "past the mill")
     chats.save(conversation)
     return conversation.identifier
-
-
-@pytest.fixture
-def model(tmp_path, monkeypatch):
-    path = model_file(tmp_path)
-    monkeypatch.setattr(mc_llm_runtime, "config", lambda role="": Config(path))
-    monkeypatch.setattr(mc_llm_runtime, "runtime_supports", lambda *args: True)
-    monkeypatch.setattr(cv, "_servers_of", lambda found: [])
-    return path
 
 
 class TestTheWords:
@@ -101,74 +87,15 @@ class TestTheWords:
         assert "+2" in shown
         assert "once the model is running" in shown, "no server here to read it with"
 
-    def test_the_label_says_when_a_vector_is_on_too(self, store, model):
+    def test_the_label_says_the_words_and_the_ways_and_nothing_else(self, store):
         identifier = thread(store)
         injection.save("Ada", identifier, words="rain")
-        cv.write(cv.folder() / "happy.gguf", {layer: [1.0] * 8 for layer in range(1, 12)})
-        cv.choose("happy.gguf")
 
-        assert chat._injection_label("Ada", identifier) == (
-            "Injection · 1 word · odds · vector")
-
-
-class TestTheVector:
-    def test_the_choices_are_none_then_each_file_one_that_does_not_fit_marked(self):
-        found = chat._vector_choices({"vectors": [
-            {"name": "happy.gguf", "fits": True}, {"name": "wide.gguf", "fits": False}],
-            "vector": "gone.gguf"})
-
-        assert found["choices"] == [("None", ""), ("happy.gguf", "happy.gguf"),
-                                    ("wide.gguf (does not fit)", "wide.gguf")]
-        assert found["value"] == "", "a vector no longer listed is not shown chosen"
-
-    def test_apply_keeps_the_vector_its_strength_and_layers(self, store, model):
-        identifier = thread(store)
-        cv.write(cv.folder() / "happy.gguf", {layer: [1.0] * 8 for layer in range(1, 12)})
-
-        drawn = chat._vector_applied("Ada", identifier, "happy.gguf", 0.75, 5, 9)
-
-        assert cv.chosen(model) == cv.Choice("happy.gguf", 0.75, 5, 9)
-        assert "next starts" in drawn[-1]
-
-    def test_apply_with_one_that_does_not_fit_says_why(self, store, model):
-        identifier = thread(store)
-        cv.write(cv.folder() / "wide.gguf", {1: [1.0] * 16})
-
-        drawn = chat._vector_applied("Ada", identifier, "wide.gguf", 1.0, 1, 11)
-
-        assert "16 wide" in drawn[-1]
-        assert cv.chosen(model).vector == ""
-
-    def test_a_file_added_is_copied_in_and_one_that_is_not_a_vector_is_refused(
-            self, store, tmp_path, model):
-        identifier = thread(store)
-        made = tmp_path / "upload.gguf"
-        cv.write(made, {1: [1.0] * 8})
-
-        class Upload:
-            name = str(made)
-            orig_name = "Calm.gguf"
-
-        drawn = chat._vector_added("Ada", identifier, Upload())
-        assert (cv.folder() / "Calm.gguf").is_file()
-        assert "Added Calm.gguf" in drawn[-1]
-
-        junk = tmp_path / "junk.gguf"
-        junk.write_bytes(b"not a vector")
-        Upload.name, Upload.orig_name = str(junk), "junk.gguf"
-        drawn = chat._vector_added("Ada", identifier, Upload())
-        assert "was not added" in drawn[-1]
-
-    def test_where_vectors_come_from_is_said_without_a_path(self, store, model):
-        said = chat._vector_said(cv.view())
-
-        assert "llama-cvector-generator" in said and "Windows builds" in said
-        assert str(store) not in said
+        assert chat._injection_label("Ada", identifier) == "Injection · 1 word · odds"
 
 
 class TestTheWiring:
-    def test_save_and_both_switches_keep_the_words_and_apply_and_upload_the_vector(
-            self, store, monkeypatch):
+    def test_save_and_both_switches_keep_the_words(self, store, monkeypatch):
         built = _built(monkeypatch)
 
         def handlers(name, kind):
@@ -178,8 +105,6 @@ class TestTheWiring:
         assert handlers("injection-save", "click") == ["_injection_saved"]
         assert handlers("injection-odds", "input") == ["_injection_saved"]
         assert handlers("injection-prompt", "input") == ["_injection_saved"]
-        assert handlers("vector-apply", "click") == ["_vector_applied"]
-        assert handlers("vector-add", "upload") == ["_vector_added"]
 
     def test_a_switch_listens_to_the_press_not_to_the_section_being_drawn(self, store,
                                                                          monkeypatch):
@@ -217,6 +142,15 @@ class TestTheWiring:
     def test_no_control_of_it_is_restored_from_forges_ui_config(self, store, monkeypatch):
         built = _built(monkeypatch)
 
-        for name in ("injection-words", "injection-odds", "injection-prompt",
-                     "vector-choice", "vector-strength", "vector-first", "vector-last"):
+        for name in ("injection-words", "injection-odds", "injection-prompt"):
             assert getattr(_by_id(built, name), "do_not_save_to_config", False) is True, name
+
+    def test_the_section_holds_no_control_vector(self, store, monkeypatch):
+        """2026-11-09, of the control vector built beside the words: "No vector
+        support". Nothing in the section chooses, strengthens or adds one."""
+        built = _built(monkeypatch)
+
+        named = [getattr(one, "elem_id", None) or "" for one in built]
+        assert not [name for name in named if "vector" in name]
+        drawn = chat._injection_view("Ada", "")
+        assert len(drawn) == 5, "the label, the box, the two ways and the read-back"

@@ -475,7 +475,21 @@ class TestTheCommand:
         assert found["injection"]["words"] == "rain"
         assert found["injection"]["prompt"] is True
         assert found["injection"]["label"] == "Injection · 1 word · odds and prompt"
-        assert "control_vector" in found
+
+    def test_there_is_no_control_vector_to_choose_or_to_start_the_model_with(self, chats):
+        """2026-11-09, of the control vector built beside the words: "No vector
+        support". No command chooses one, no snapshot shows one, and the language
+        model is started with none."""
+        import inspect
+
+        import mc_llm_runtime
+
+        conversation = long_thread(chats, exchanges=1)
+
+        assert not [action for action in service.ACTIONS if "vector" in action]
+        assert not [key for key in service.snapshot("Ada", conversation.identifier)
+                    if "vector" in key]
+        assert "--control-vector" not in inspect.getsource(mc_llm_runtime)
 
     def test_a_branch_keeps_the_list_and_a_delete_forgets_it(self, chats):
         from test_conversation_service import envelope

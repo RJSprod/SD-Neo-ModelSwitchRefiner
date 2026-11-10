@@ -3714,10 +3714,9 @@ window and the summary of what it has.
 
 ### Injection
 
-Words a thread's replies lean towards, and a push applied inside the model's
-layers: the Conversation pop-up's **Injection** section in LLM Studio, the ⋯
-menu's **Injection** submenu in the panel. Its label says what is in force
-(*Injection · 3 words · odds and prompt · vector*).
+Words a thread's replies lean towards: the Conversation pop-up's **Injection**
+section in LLM Studio, the ⋯ menu's **Injection** submenu in the panel. Its
+label says what is in force (*Injection · 3 words · odds and prompt*).
 
 **Words** are the thread's own, kept beside it (`injection.json` under the LLM
 data root, never in its file) and kept by a branch. One a line — commas part a
@@ -3750,31 +3749,6 @@ typed is lost to a press. Two ways they steer, either or both:
 
 The list says how each word reads against the running model's tokenizer, and
 that it will once the model runs.
-
-**Control vector** — the language model's, not the thread's: one direction per
-layer, added to the model's hidden state for everything it reads and writes,
-made from pairs of prompts that differ in one thing (happy against sad, terse
-against wordy). It pushes every reply on that model — every conversation, and
-every prompt it writes for the image side and Mini Paint NEO — without a word
-in the prompt. A vector is made for one model by llama.cpp's
-`llama-cvector-generator`, which none of llama.cpp's Windows release archives
-include (it is built only with the backends linked in, and every release links
-them dynamically), so a vector is made elsewhere, for the same model, and added
-with **Add a vector file…** (LLM Studio) or put in the `control_vectors` folder
-of the LLM data root. Each is checked against the model: a vector is one
-model's, by its width and its layers, and one that does not fit is listed as
-not fitting and cannot be chosen. **Strength** (−8 to 8; a vector from the
-generator is one unit long at each layer, and a negative strength pushes the
-other way), **From layer** and **To layer** (LLM Studio; by default from about a
-third of the way in to the last, as llama.cpp advises), then **Apply**: kept
-for the model by its file name, and the model is started again with it as soon
-as nothing is being written — every conversation is read in full at its next
-message. llama-server is given a copy written with the strength and the layers
-taken in (`--control-vector`), because `--control-vector-scaled` takes
-`FILE:STRENGTH` and a Windows path's drive already has a colon. A vector
-llama-server will not start with is set aside and the model started without
-it; the section says so until it is chosen again. A saved prompt cache is kept
-to the vector it was saved under.
 
 ### Who said what
 

@@ -4,9 +4,9 @@
 include in its response? Like a word injection into the mind of the LLM that
 can be used to subconsciously steer it." Of the three ways put to the user --
 the odds, a note in the prompt, a control vector -- "I like all three options,
-give it a menu for 'Injection'" (2026-11-09). This module is the first two; the
-third is :mod:`mc_llm_control_vector`, which is the model's rather than a
-thread's.
+give it a menu for 'Injection'" (2026-11-09). This module is the first two. The
+third was built beside it and merged with it (#328), then taken out at the
+user's word: "No vector support".
 
 **The words.** One list per thread (:func:`for_thread`), kept beside the threads
 in ``injection.json`` for the emotion's reason (:mod:`mc_llm_emotions`): a write

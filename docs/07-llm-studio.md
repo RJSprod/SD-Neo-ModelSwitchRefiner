@@ -5468,13 +5468,15 @@ inside the status line at its right end, a press opening the pop-up at Context,
 Trim saying what it kept. Twenty-eight mutations each fail a test. Not run
 against a real llama-server or on the user's machine.
 
-## 51. Injection: words a thread leans towards, and the model's control vector (9 November 2026)
+## 51. Injection: words a thread leans towards (9 November 2026)
 
 > "Is there a way to make a list of words the the LLM becomes more likely to
 > include in its response? Like a word injection into the mind of the LLM that
 > can be used to subconsciously steer it."
 
 > "Good, and I like all three options, give it a menu for "Injection""
+
+> "No vector support"
 
 **The three ways put to the user**, and what each is. The **odds**:
 llama-server's own `logit_bias`, a number added to a token's score each time
@@ -5484,7 +5486,9 @@ the emotion's is (§40.8): the model reads it, uses the words where they fit,
 and a change of it is a new front to the prompt. A **control vector**: a
 direction per layer added to the hidden state -- the closest thing to a thought
 put into the model -- made from contrasting prompts, given to llama-server only
-when it starts and so the model's rather than a thread's.
+when it starts and so the model's rather than a thread's. All three were built
+and merged (#328); the third was then taken out at the user's word ("No vector
+support"), and what was learned building it is below.
 
 **The words** (`mc_llm_injection`). Each thread keeps a list beside it
 (`injection.json`), for the emotion's reason: a write to the conversation's own
@@ -5523,69 +5527,52 @@ word reads and the note (`view`).
   compares it before and after) reads the conversation again in the background
   (`ops.rewarm`); a change of the odds alone reads nothing.
 
-**The control vector** (`mc_llm_control_vector`). llama.cpp's
-`llama-cvector-generator` makes one from a model and two files of prompts. It
-is in none of llama.cpp's Windows release archives -- `tools/CMakeLists.txt`
-builds it only when `NOT GGML_BACKEND_DL`, and every release builds the
-backends as loadable libraries -- which the b10621 archives this extension
-installs confirm: twenty-one programs in the CUDA archive, twenty-two in the
-SYCL one, and not that one (read from each archive's central directory). And no
-program in them gives a model's per-layer hidden states, which making a vector
-needs: `imatrix` keeps squares, `results` keeps logits. So a vector is made
-elsewhere and added here; making one inside the extension waits on a generator
-the user can run.
-
-- **Read** (`read`): a GGUF of `direction.N` tensors, N from 1, each one row of
-  32-bit numbers, all the same width -- the loader's own rules
-  (`common_control_vector_load_one`), checked first because a vector llama-server
-  will not load stops the model starting. **Fits** (`fits`): its width the
-  model's `embedding_length`, no layer past `block_count`.
-- **Chosen** per model by its file name (`control_vector.json`): the vector, a
-  strength within ±8 (the generator's directions are unit length), and layers,
-  by default from about 30% in to the last (llama.cpp's README: better past the
-  first ten of thirty-two). `SET_CONTROL_VECTOR` chooses it against no revision.
-- **Given** as a copy written with the strength and the layers taken in
-  (`applied`: `control_vectors/applied/<digest>.gguf`, the digest of the file's
-  stamp and the choice), passed with `--control-vector` -- because
-  `--control-vector-scaled` splits `FILE:STRENGTH` at every colon and refuses
-  three parts, which a Windows path with its drive gives (`common/arg.cpp`). A
-  path with a comma, which the flag reads as a list, starts without it. The flag
-  is optional (`OPTIONAL_FLAGS`); a start that fails with it for anything but
-  memory sets the vector aside and starts again without it
-  (`set_aside_after_failure`), until it is chosen again.
-- **Applied**: a change stops the servers of that model when the broker says
-  nothing is being written (`mc_broker.llm_busy`), else a thread waits for that,
-  up to ten minutes, and the next request starts it with the new copy. The saved
-  prompt caches' identity includes the copy (`mc_llm_slot_cache.identity`'s
-  `steering`), left out when there is none so a server started as before keeps
-  its caches.
-- **Added**: an uploaded file is read as a vector before it is copied in, under
-  a name made safe and never over another.
-
-Nothing about a vector reaches a log by name: a vector's file name is the
-user's (the standing convention).
-
 **The menus.** LLM Studio's Conversation pop-up has an **Injection** section
 after Generation (`_injection_view` and the handlers after it): the words box,
 *Weigh the odds* and *Tell the model* (`input`, so the section being drawn
-never saves), how each word reads (escaped), Save words; then the vector's
-drop-down (one that does not fit marked so), Strength, From layer and To layer,
-*Add a vector file…*, Apply and where it stands; every control out of Forge's
-`ui-config.json`. Its label says what is in force, *· vector* once one is on or
-coming. The panel's is docs/22 §3.55.
+never saves), how each word reads (escaped) and Save words; every control out
+of Forge's `ui-config.json`. Its label says what is in force. The panel's is
+docs/22 §3.55.
+
+**The control vector, built and taken out.** It was built in the same round
+and merged with the words (`mc_llm_control_vector`, commit `1d3cdb0`, merged by
+#328): vectors made elsewhere, read and checked against the model's width and
+layers, chosen per model with a strength and layers, given to llama-server as a
+copy with both taken in, set aside after a start that failed with one, the
+model stopped to take a change only when idle, saved prompt caches kept to
+their vector, and its part of both menus. The user then said "No vector
+support", and the next change took all of it out; no command, snapshot field,
+launch flag or control of it remains, which the tests hold. A `control_vector.json`
+or `control_vectors` folder a machine kept from those builds is read by nothing.
+Two facts from building it, for whoever is asked again:
+
+- **llama.cpp's Windows releases cannot make one.** `llama-cvector-generator`
+  is built only when `NOT GGML_BACKEND_DL` (`tools/CMakeLists.txt`), and every
+  release archive builds the backends as loadable libraries: the b10621
+  archives this extension installs list twenty-one programs (CUDA) and
+  twenty-two (SYCL), read from each archive's central directory, and none of
+  the rest gives the per-layer hidden states a vector is made from (`imatrix`
+  keeps squares, `results` keeps logits). A vector would have to be made
+  elsewhere, for the same model.
+- **`--control-vector-scaled FILE:SCALE` cannot take a Windows path.** It splits
+  its argument at every colon and refuses anything but two parts
+  (`common/arg.cpp`), which `C:\...\v.gguf:0.8` is not; plain
+  `--control-vector` with a copy written at the strength works, its value a
+  comma-separated list. And a vector llama-server will not load stops the whole
+  server starting (`common_init_from_params` returns before the context), so
+  every file would need checking against the loader's rules first.
 
 **Tests.** `tests/test_llm_injection.py` (the list, the forms, the odds, the
 note, the store; through the real service and builder: what a reply carries,
 the note before the emotion, in the cache update's request and compaction's
 frame, the meter counting it, the command, the snapshot, branch and delete; the
-reply resolving its words and the clients' bodies), `tests/test_llm_tokens.py`
-(pieces read after another token, remembered, read alone when the context does
-not stay whole), `tests/test_llm_control_vector.py` (the file, the fit, the
-choice, the copy, the flag, the set-aside, the runtime's start, the cache
-identity before and after, the stop when idle, adding a file, what the menus
-show), `tests/test_llm_studio_injection.py` (the handlers and the wiring) and
-three checks in `tests/live/llm_studio_conversation_live.py` on real Gradio
-4.40.0. Fifty-six mutations each fail one; three survived a first pass and their
-tests were tightened (the file read raw, the cache identity against the formula
-before the change, a switch that is not true or false). Not run against a real
-llama-server, with a real vector, or on the user's machine.
+reply resolving its words and the clients' bodies; no control vector anywhere),
+`tests/test_llm_tokens.py` (pieces read after another token, remembered, read
+alone when the context does not stay whole), `tests/test_llm_studio_injection.py`
+(the handlers and the wiring, and no vector control) and three checks in
+`tests/live/llm_studio_conversation_live.py` on real Gradio 4.40.0. The words'
+thirty-nine mutations each fail a test (two survived a first pass and their
+tests were tightened: a list back at the defaults, now read in the raw file,
+and a switch that is not true or false sent by the store), and the four absence
+tests fail with each of six parts of the vector put back. Not run against a
+real llama-server or on the user's machine.

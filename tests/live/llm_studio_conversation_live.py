@@ -474,9 +474,9 @@ def main() -> int:
                 f"() => (document.querySelector('{meter}') || {{}}).textContent || null")
             found["context"] = context
 
-            # Injection (mc_llm_injection, mc_llm_control_vector): two words saved,
-            # the section relabelled; "Tell the model" pressed keeps the box with
-            # it; the vector's part says where it stands and where vectors come from.
+            # Injection (mc_llm_injection): two words saved, the section
+            # relabelled; "Tell the model" pressed keeps the box with it; and no
+            # control vector anywhere in it ("No vector support").
             page.click("#mc-llm-chat-injection .label-wrap")
             words = "#mc-llm-chat-injection-words textarea"
             page.wait_for_selector(words, state="visible", timeout=10000)
@@ -500,11 +500,12 @@ def main() -> int:
                 return l && l.textContent.includes('odds and prompt'); }""", timeout=10000)
             injection["told label"] = page.evaluate(LABEL, "mc-llm-chat-injection")
             injection["box kept"] = page.evaluate(f"() => document.querySelector('{words}').value")
-            injection["vector state"] = page.evaluate("""() => document.querySelector(
-                '#mc-llm-chat-vector-state').textContent""")
-            injection["vector controls"] = page.evaluate("""() => ['vector-choice',
-                'vector-strength', 'vector-first', 'vector-last', 'vector-add',
-                'vector-apply'].map((id) => !!document.querySelector('#mc-llm-chat-' + id))""")
+            injection["vector parts"] = page.evaluate("""() => [...document.querySelectorAll(
+                '#mc-llm-chat-injection [id], #mc-llm-chat-injection [class]')]
+                .filter((node) => /vector/i.test(node.id + ' ' + node.getAttribute('class')))
+                .length
+                + (/vector/i.test(document.querySelector('#mc-llm-chat-injection')
+                    .textContent) ? 1 : 0)""")
             import mc_llm_injection
 
             injection["kept"] = [record.to_dict() for record in mc_llm_injection._read().values()]
@@ -604,10 +605,8 @@ def main() -> int:
             and found.get("injection", {}).get("box kept") == "rain +2\ndelve ban"
             and found.get("injection", {}).get("kept") == [
                 {"words": "rain +2\ndelve ban", "odds": True, "prompt": True}]),
-        "the control vector's part is there and says where vectors come from": (
-            all(found.get("injection", {}).get("vector controls") or [False])
-            and "llama-cvector-generator" in (found.get("injection", {}).get("vector state")
-                                              or "")),
+        "the section holds no control vector": (
+            found.get("injection", {}).get("vector parts") == 0),
         "no script errors": not errors,
     }
     print(json.dumps({"checks": checks, "found": found, "errors": errors, "made": made}, indent=1))

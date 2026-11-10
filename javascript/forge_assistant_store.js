@@ -1429,20 +1429,6 @@
         return this.send(envelope);
     };
 
-    /** The language model's control vector (mc_llm_control_vector): a file's
-     *  name, or "" for none, with its strength. The model's, not the thread's;
-     *  named against the open thread, which asks for no revision. */
-    Store.prototype.setControlVector = function (vector, strength) {
-        const envelope = this.envelope("set_control_vector", {expected_revision: null});
-        const payload = {vector: String(vector || "")};
-        const number = Number(strength);
-        if (strength !== undefined && strength !== null && isFinite(number)) {
-            payload.strength = number;
-        }
-        envelope.payload = payload;
-        return this.send(envelope);
-    };
-
     /** Whether the open thread is being compacted: from the snapshot, and from
      *  the feed's `context` events while it lasts. */
     Store.prototype.compacting = function () {

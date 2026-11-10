@@ -5410,19 +5410,11 @@
     //
     // Words the open thread's replies lean towards, two ways -- the odds of
     // their tokens, which the model never reads, and a note at the end of its
-    // system prompt (the server's mc_llm_injection) -- and the language model's
-    // control vector, a push inside its layers kept for the model rather than
-    // the thread (mc_llm_control_vector). 2026-11-09: "a word injection into the
-    // mind of the LLM ... I like all three options, give it a menu for
-    // 'Injection'". The vector's layers are LLM Studio's to choose; Apply here
-    // keeps them as they are.
+    // system prompt (the server's mc_llm_injection). 2026-11-09: "a word
+    // injection into the mind of the LLM ... give it a menu for 'Injection'".
 
     function shownInjection(view) {
         return ((view && view.conversation) || {}).injection || null;
-    }
-
-    function shownVector(view) {
-        return ((view && view.conversation) || {}).control_vector || null;
     }
 
     /** What the Injection entry says beside its name: how many words, and
@@ -5449,7 +5441,7 @@
                                  injectionValue(injection)));
         item.disabled = !view.selection.thread;
         item.title = view.selection.thread
-            ? "Words its replies lean towards, and the model's control vector"
+            ? "Words its replies lean towards"
             : "Choose a conversation first";
         item.addEventListener("click", () => this.showMenu("injection"));
         return item;
@@ -5494,8 +5486,8 @@
         return list;
     }
 
-    /** The submenu: the thread's words with Save and the two ways, how each
-     *  word reads, then the model's control vector with its strength. */
+    /** The submenu: the thread's words with Save and the two ways, then how
+     *  each word reads. */
     Shell.prototype.injectionItems = function () {
         const view = this.store.snapshot();
         const shown = (view.conversation || {}).conversation || {};
@@ -5535,52 +5527,6 @@
         items.push(actions);
         const read = injectionRead(injection);
         if (read) items.push(read);
-        items.push(this.groupLabel("Control vector · every conversation on this model"));
-        this.vectorItems(shownVector(view)).forEach((item) => items.push(item));
-        return items;
-    };
-
-    /** The control vector's part of the submenu: which one, how strong, Apply. */
-    Shell.prototype.vectorItems = function (vector) {
-        if (!vector) {
-            return [element("p", "forge-assistant-injection-note",
-                            "The control vector could not be read.")];
-        }
-        const items = [];
-        const select = element("select", "forge-assistant-vector-select");
-        select.setAttribute("aria-label", "Control vector");
-        const none = element("option", "", "None");
-        none.value = "";
-        select.appendChild(none);
-        (vector.vectors || []).forEach((found) => {
-            const option = element("option", "", found.fits ? found.name
-                                   : found.name + " (does not fit)");
-            option.value = found.name;
-            option.disabled = !found.fits;
-            if (found.why) option.title = found.why;
-            select.appendChild(option);
-        });
-        select.value = vector.vector || "";
-        items.push(select);
-        const strength = contextRange("Strength", Number(vector.strength || 1), -8, 8, 0.05);
-        items.push(strength.row);
-        const actions = element("div", "forge-assistant-injection-actions");
-        const apply = element("button", "forge-assistant-vector-apply", "Apply");
-        apply.type = "button";
-        apply.disabled = vector.state === "unavailable";
-        apply.addEventListener("click", () => this.vectorAction(select.value,
-                                                                Number(strength.input.value)));
-        actions.appendChild(apply);
-        items.push(actions);
-        const said = element("p", "forge-assistant-injection-note forge-assistant-vector-state",
-                             vector.said || "");
-        said.dataset.state = vector.state || "";
-        items.push(said);
-        items.push(element("p", "forge-assistant-injection-note",
-                           "A vector is made for one model by llama.cpp's "
-                           + "llama-cvector-generator, which its Windows builds do not "
-                           + "include: make one elsewhere and put it in "
-                           + (vector.folder || "the control_vectors folder") + "."));
         return items;
     };
 
@@ -5599,19 +5545,6 @@
                 this.tell(count ? count + (count === 1 ? " word" : " words") + " kept, "
                           + (ways.length ? ways.join(" and ") : "used neither way") + "."
                     : "No injected words in this thread.", "info");
-            }
-            return this.store.refresh();
-        }).then(() => this.redrawInjection());
-    };
-
-    /** Keep the model's control vector and its strength. */
-    Shell.prototype.vectorAction = function (name, strength) {
-        return this.store.setControlVector(name, strength).then((outcome) => {
-            if (outcome && !outcome.ok) {
-                this.tell((outcome.error && outcome.error.message)
-                    || "That could not be kept.", "warn");
-            } else {
-                this.tell(((outcome && outcome.control_vector) || {}).said || "Kept.", "info");
             }
             return this.store.refresh();
         }).then(() => this.redrawInjection());

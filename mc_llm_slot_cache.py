@@ -231,24 +231,18 @@ def launch_flags(configuration, full_cache: bool = False,
 
 
 def identity(runtime, model, projector, full_cache: bool, cache_types: str = "",
-             template=None, steering=None) -> str:
+             template=None) -> str:
     """Which server a saved cache belongs to, as twelve hex digits.
 
     Each file part is a path, size and modification time, so a replaced build,
     a re-downloaded model, a different projector or a different chat template
     is a different identity and its files are simply never offered to the new
     one. ``template`` is the ``--chat-template-file`` the start was given, if
-    any: the template decides every token of every prompt. ``steering`` is the
-    control vector it was given, if any (:mod:`mc_llm_control_vector`): the
-    vector is in every number the cache holds, so a cache saved with one is no
-    cache for a server with another or none. Left out of the identity when
-    there is none, so a server started as before keeps the caches it had.
+    any: the template decides every token of every prompt.
     """
     parts = [_stamp(runtime), _stamp(model), _stamp(projector),
              "full" if full_cache else "window", str(cache_types or "default"),
              _stamp(template or None)]
-    if steering:
-        parts.append("steering:" + _stamp(steering))
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
 
 

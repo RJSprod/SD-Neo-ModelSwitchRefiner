@@ -1,10 +1,10 @@
 """The Forge Assistant's ⋯ → Injection, executed under node.
 
-"I like all three options, give it a menu for 'Injection'" (2026-11-09). The
-submenu holds the open thread's words -- a box, Save, and the two ways they
-steer, each a switch that keeps the box with it so nothing typed is lost to a
-press -- how each word reads, and the model's control vector with its strength
-and Apply. The store sends both commands against no revision.
+"I like all three options, give it a menu for 'Injection'" (2026-11-09); then,
+of the third, "No vector support". The submenu holds the open thread's words --
+a box, Save, and the two ways they steer, each a switch that keeps the box with
+it so nothing typed is lost to a press -- and how each word reads. The store
+sends the command against no revision.
 """
 
 from __future__ import annotations
@@ -23,15 +23,6 @@ INJECTION = {"words": "rain +2\ntapestry -4", "odds": True, "prompt": False,
              "left_out": ["“word65” is past the first 64 words"], "read": True,
              "note": "", "label": "Injection · 2 words · odds"}
 
-VECTOR = {"model": "gemma.gguf", "width": 8, "layers": 12,
-          "vectors": [{"name": "happy.gguf", "fits": True, "why": "", "layers": 11, "hint": ""},
-                      {"name": "wide.gguf", "fits": False,
-                       "why": "It was made for a model 16 wide; this one is 8.", "layers": 11,
-                       "hint": ""}],
-          "vector": "happy.gguf", "strength": 0.75, "first_layer": 4, "last_layer": 11,
-          "state": "next_start", "said": "Takes effect when the model next starts.",
-          "folder": "the control_vectors folder in the language model's data folder"}
-
 SHELL = """
 const made = (tag) => document.createElement(tag);
 const shell = Object.create(NS.Shell.prototype);
@@ -41,15 +32,13 @@ shell.host = {listUtilities: () => [], openOnly() {}};
 let view = {selection: {character: "Ada", thread: "t1"},
             conversation: {conversation: {title: "Harbour", emotion: ""}, emotions: [],
                            threads: [{thread_id: "t1", title: "Harbour"}],
-                           injection: __INJECTION__, control_vector: __VECTOR__}};
+                           injection: __INJECTION__}};
 const sent = [];
 const answers = {};
 shell.store = {
     snapshot: () => view,
     setInjection(values) { sent.push(["set_injection", values]);
         return Promise.resolve(answers.set_injection || {ok: true, injection: view.conversation.injection}); },
-    setControlVector(name, strength) { sent.push(["set_control_vector", name, strength]);
-        return Promise.resolve(answers.set_control_vector || {ok: true, control_vector: {said: "Kept it."}}); },
     refresh() { sent.push(["refresh"]); return Promise.resolve(null); },
 };
 const told = [];
@@ -75,9 +64,9 @@ const everywhere = (cls) => menu.children.reduce((all, child) => deep(child, cls
 """
 
 
-def shell(scenario: str, injection=INJECTION, vector=VECTOR) -> dict:
-    return run(SHELL.replace("__INJECTION__", json.dumps(injection))
-               .replace("__VECTOR__", json.dumps(vector)) + scenario, sources=("shell",))
+def shell(scenario: str, injection=INJECTION) -> dict:
+    return run(SHELL.replace("__INJECTION__", json.dumps(injection)) + scenario,
+               sources=("shell",))
 
 
 class TestTheEntry:
@@ -193,49 +182,30 @@ class TestTheWords:
         assert "Choose a conversation to give it words." in found
 
 
-class TestTheVector:
-    def test_none_then_each_file_one_that_does_not_fit_disabled_and_saying_why(self):
+class TestNoVector:
+    def test_the_submenu_ends_with_the_words_and_holds_no_control_vector(self):
+        """2026-11-09, of the control vector built beside the words: "No vector
+        support". The submenu's last part, before Cancel, is how each word
+        reads."""
         found = shell("""
             shell.showMenu("injection");
-            const select = find("forge-assistant-vector-select")[0];
-            console.log(JSON.stringify({value: select.value, options: select.children.map((o) =>
-                [o.value, o.textContent, !!o.disabled, o.title || ""])}));
+            const text = (node) => (node.textContent || "")
+                + (node.children || []).map(text).join("");
+            const classes = (node) => [String(node.className || "")]
+                .concat((node.children || []).map(classes).flat());
+            const own = menu.children.filter((child) => !has(child, "forge-assistant-cancel"));
+            console.log(JSON.stringify({last: own[own.length - 1].className,
+                texts: menu.children.map(text),
+                classes: menu.children.map(classes).flat(),
+                selects: menu.children.filter((child) => child.tagName === "SELECT").length,
+                title: shell.injectionItem().title}));
         """)
 
-        assert found["value"] == "happy.gguf"
-        assert found["options"] == [
-            ["", "None", False, ""], ["happy.gguf", "happy.gguf", False, ""],
-            ["wide.gguf", "wide.gguf (does not fit)", True,
-             "It was made for a model 16 wide; this one is 8."]]
-
-    def test_apply_sends_the_choice_and_its_strength_and_says_where_it_stands(self):
-        found = shell("""
-            shell.showMenu("injection");
-            const select = find("forge-assistant-vector-select")[0];
-            select.value = "";
-            const slider = everywhere("forge-assistant-context-slider")[0];
-            slider.value = "-1.5";
-            press(everywhere("forge-assistant-vector-apply")[0]);
-            settle().then(() => console.log(JSON.stringify({sent, told,
-                said: everywhere("forge-assistant-vector-state").map((p) => [p.textContent,
-                    p.dataset.state])})));
-        """)
-
-        assert found["sent"][0] == ["set_control_vector", "", -1.5]
-        assert found["told"] == [["Kept it.", "info"]]
-        assert found["said"] == [["Takes effect when the model next starts.", "next_start"]]
-
-    def test_with_no_model_apply_is_dark_and_where_vectors_come_from_is_said(self):
-        vector = dict(VECTOR, state="unavailable", said="Set up a language model first.")
-        found = shell("""
-            shell.showMenu("injection");
-            console.log(JSON.stringify({dark: everywhere("forge-assistant-vector-apply")[0].disabled,
-                notes: menu.children.map((child) => child.textContent)
-                    .filter((text) => text.indexOf("llama-cvector-generator") >= 0)}));
-        """, vector=vector)
-
-        assert found["dark"] is True
-        assert len(found["notes"]) == 1 and "Windows builds" in found["notes"][0]
+        assert found["last"] == "forge-assistant-injection-read"
+        assert not [text for text in found["texts"] if "vector" in text.lower()]
+        assert not [name for name in found["classes"] if "vector" in name]
+        assert found["selects"] == 0
+        assert found["title"] == "Words its replies lean towards"
 
 
 class TestTheStore:
@@ -258,7 +228,10 @@ class TestTheStore:
         assert self.sent("setInjection({odds: 'no', prompt: true, words: 3})")[0][2] == {
             "prompt": True}
 
-    def test_the_vector_is_sent_with_its_strength_and_none_is_empty(self):
-        assert self.sent('setControlVector("happy.gguf", 0.5)')[0][:3] == [
-            "set_control_vector", None, {"vector": "happy.gguf", "strength": 0.5}]
-        assert self.sent("setControlVector(null)")[0][2] == {"vector": ""}
+    def test_the_store_has_no_command_for_a_control_vector(self):
+        found = run("""
+            console.log(JSON.stringify(Object.getOwnPropertyNames(NS.Store.prototype)
+                .filter((name) => /vector/i.test(name))));
+        """, sources=("store",))
+
+        assert found == []
