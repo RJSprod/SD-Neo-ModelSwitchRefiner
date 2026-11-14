@@ -4883,3 +4883,53 @@ value, the box and the two switches, a switch keeping what was typed, Save, a
 refusal said, how each word reads as plain text, the vector's select, Apply with
 its strength and with no model, the store's two envelopes. Three older menu tests
 gained the entry.
+
+## 3.56 The extra networks in focus mode, again: the column and the peek (2026-11-14)
+
+> "I need a fix for focus mode. The extra networks still don't work correctly
+> in focus mode. The panel won't scroll, and seems to be broken when I open it
+> in focus mode. Let's fix that."
+
+§3.52 checked the drawer layout with the bar shown, which worked. Two cases it
+did not draw were broken, both the Model Chain theme's stylesheet (docs/24 §0,
+the extra networks drawer):
+
+- **The column layout.** Its rules (`data-mc-theme-networks="column"`: a grid
+  host, the head and the page sticky in the second column) applied in focus mode
+  too, and focus mode's own rules undid them one property at a time, back to the
+  drawer. They missed `align-self: start` on the page, which Chromium and Gecko
+  both honour on a fixed box: instead of stretching between its `top` and
+  `bottom`, the page was as tall as its cards (4,657 px on the test page, 4,704 in
+  Zen), so it had nothing to scroll, and it lay from the window's top over its own
+  head. They missed the column's z-index too, which put the drawer a step above
+  the workspace's own columns rather than at the drawer's layer. Reproduced in
+  Chromium and in a Gecko build (Zen 1.24.2b, Firefox 160) on the layout test page;
+  the drawer layout scrolled in both. The column's rules now say
+  `body:not(.forge-assistant-focused)`: they are the page's alone, and in focus
+  mode the drawer's own rules are the whole of it, nothing left to undo.
+- **A drawer opened from the peeking bar.** Focus mode hung the drawer from the
+  workspace's top (`--forge-assistant-focus-top`), which is the bar's bottom only
+  while the bar is shown. With *Tab Bar in Focus* off the workspace starts at the
+  window's top and the bar peeks over it, so the drawer did too, under the bar:
+  its title and close were beneath the bar for as long as the open drawer held the
+  peek (§3.52). It hangs from the header's height now (`--mc-theme-header`, the
+  drawer's own rule on the page), the kept bar's bottom whether it is shown or
+  peeking, and nothing beside a rail.
+
+Focus mode's rules for the drawer are now only the hidden bar's (`display:
+none`), so a phone's drawer in focus mode is the window's width as on the page,
+where focus mode's undoing had held it at the setting's width; and the rail rule's
+two focus-mode selectors went with the `right: 0` they outranked.
+
+**Verified.** `tests/test_theme_layout.py` (Chromium, `TestExtraNetworksInFocusMode`):
+in both layouts, with the bar shown and peeking, the head hangs from the bar's
+bottom at the window's right edge with its close on top, the page runs under it to
+the window's bottom as wide as the head, holds more than it shows, and a wheel over
+it scrolls it and not the workspace; a column open on the page is the drawer when
+focus comes on and a column again, with nothing of focus mode's left on it, when
+it goes; on a phone the drawer is the window's width in focus mode as on the page.
+Six mutations each fail a test (the old stylesheet whole; each of the column's three
+rules applied in focus mode again; the drawer hung from the workspace's top; the
+setting's width kept in focus mode). The same probe in Zen, driven by Selenium, read
+the old stylesheet's column page at 4,704 px from the window's top and the new one's
+at 624 px under its head, scrolling. Not run on the user's machine.

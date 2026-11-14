@@ -4596,7 +4596,10 @@ comes, stays for as long as you hold on, and goes four seconds after you let
 go. A drag is no press, so the panel neither opens nor closes for it. A drawer
 you open from the bar while it is there for its moment -- the extra networks,
 the quick settings -- keeps the bar, and itself, on screen until you close it,
-so you can search, scroll and look into cards as long as you like. Forge's own
+so you can search, scroll and look into cards as long as you like. The extra
+networks hang from the bar's bottom then too, their title and close under it
+rather than beneath it, and in either of their layouts they are the drawer in
+focus mode, their cards scrolling under their head. Forge's own
 pop-ups work in focus mode as on the page: a card's details and metadata
 editor, LoRA Details' dialog, the picture viewer and Generate's right-click
 menu all show over the focused workspace. A press on the
@@ -7962,7 +7965,15 @@ one second.
   with the bar it keeps shown or peeking, the header's button opens it over
   the workspace's right edge from the bar's bottom, in either layout, and with
   that bar hidden it stays out of the workspace -- unless you open it while
-  the bar is peeking: then it keeps the bar, and itself, until you close it. A page is taken only once Forge's script has wired it (it
+  the bar is peeking: then it keeps the bar, and itself, until you close it.
+  In focus mode the column layout is the drawer, exactly as the drawer layout
+  draws it -- its width, its page scrolling under its head to the window's
+  bottom, a phone's whole width -- and a column left open on the page is the
+  drawer when focus comes on and a column again when it goes (until
+  2026-11-14 the column's page in focus mode was as tall as its cards, so it
+  did not scroll, and lay over its own head; and a drawer opened from the
+  peeking bar hung from the window's top, its title and close under the
+  bar). A page is taken only once Forge's script has wired it (it
   does so after the page's HTML arrives, later than the page's load), and is
   drawn at the drawer's density: the search box on a row of its own, as tall
   as a button, its magnifier in its left padding and centred (Forge draws the

@@ -1319,9 +1319,9 @@ FOCUS_BAR = """() => {
 }"""
 
 
-def focus_page(browser, width=1280, height=800, opts=None):
+def focus_page(browser, width=1280, height=800, opts=None, more_cards=0):
     page = open_page(browser, dict(ICONS, **(opts or {})), width=width, height=height,
-                     assistant=USER_CSS_WHOLE)
+                     assistant=USER_CSS_WHOLE, more_cards=more_cards)
     settle(page, 8)
     return page
 
@@ -4274,3 +4274,126 @@ class TestExtraNetworksInFocusMode:
 
         assert kept == {"mode": "peek", "drawn": True, "held": True}, kept
         assert closed["drawn"] is False and closed["held"] is False, closed
+
+    # The drawer as drawn: its head and its page, whether each is on top
+    # where it is (the head at its close, the page a little under its top),
+    # and whether the page has more than it shows.
+    DRAWN = """() => { const q = (s) => document.querySelector(s);
+        const box = (el) => { const r = el.getBoundingClientRect();
+            return {top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width}; };
+        const on = (el, x, y) => { const hit = document.elementFromPoint(x, y); return !!hit && el.contains(hit); };
+        const head = q('#mc-theme-networks-txt2img'), page = q('#txt2img_lora');
+        const close = head.querySelector('.mc-theme-networks-close').getBoundingClientRect();
+        const p = page.getBoundingClientRect(), root = q('.forge-assistant-focus-root');
+        return {mode: document.body.getAttribute('data-forge-assistant-focus-bar'),
+                bar: box(q('#tabs > .tab-nav')), head: box(head), page: box(page),
+                position: getComputedStyle(page).position, host: getComputedStyle(page.parentElement).display,
+                inlineTop: page.style.top + head.style.top,
+                closeOnTop: on(head, close.left + close.width / 2, close.top + close.height / 2),
+                pageOnTop: on(page, p.left + p.width / 2, p.top + 120),
+                more: page.scrollHeight - page.clientHeight, scrolled: page.scrollTop,
+                workspace: root ? root.scrollTop : null,
+                width: document.documentElement.clientWidth, height: innerHeight}; }"""
+
+    @staticmethod
+    def wheel_over_the_page(page, found):
+        page.mouse.move((found["page"]["left"] + found["page"]["right"]) / 2, found["page"]["top"] + 200)
+        page.mouse.wheel(0, 400)
+        page.wait_for_function("document.querySelector('#txt2img_lora').scrollTop > 0", timeout=3000)
+        settle(page, 4)
+
+    def assert_the_drawer(self, found):
+        """Hung from the bar's bottom at the window's right edge, the page
+        under the head down to the window's bottom, as wide as the head, both
+        over the workspace, and the page holding more than it shows."""
+        head, shown = found["head"], found["page"]
+        assert found["position"] == "fixed", found
+        assert head["top"] == found["bar"]["bottom"] == 44, found
+        assert head["right"] == shown["right"] == found["width"], found
+        assert head["width"] == shown["width"] == 340, found
+        assert abs(shown["top"] - head["bottom"]) <= 1 and shown["bottom"] == found["height"], found
+        assert found["closeOnTop"] is True and found["pageOnTop"] is True, found
+        assert found["more"] > 1000, "the cards are taller than the drawer: it has something to scroll"
+
+    @pytest.mark.parametrize("bar", ["shown", "peek"])
+    @pytest.mark.parametrize("layout", ["drawer", "column"])
+    def test_its_page_scrolls_under_its_head_in_either_layout(self, browser, layout, bar):
+        """"The extra networks still don't work correctly in focus mode. The
+        panel won't scroll, and seems to be broken when I open it in focus
+        mode." Two things, both drawn here. The column layout's rules were
+        undone in focus mode one property at a time and its `align-self:
+        start` was missed, which a fixed box honours: the page was as tall as
+        its cards between its insets, nothing to scroll, laid over the head
+        from the window's top. And opened from the peeking bar, in either
+        layout, the drawer hung from the workspace's top, under the bar: its
+        title and close were beneath it for as long as it held the peek."""
+        page = focus_page(browser, opts={"model_chain_theme_networks_mode": layout}, more_cards=40)
+        try:
+            if bar == "peek":
+                page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+            enter_focus(page)
+            if bar == "peek":
+                page.evaluate("forgeAssistant.shell.peekBar()")
+                settle(page, 4)
+            drawer_on_lora(page)
+            settle(page, 6)
+            found = page.evaluate(self.DRAWN)
+            self.wheel_over_the_page(page, found)
+            after = page.evaluate(self.DRAWN)
+        finally:
+            page.close()
+
+        assert found["mode"] == bar, found
+        self.assert_the_drawer(found)
+        assert after["scrolled"] >= 300 and after["workspace"] == 0, "the wheel scrolls the drawer, not the workspace"
+        assert after["head"] == found["head"], "the head stays where it is"
+
+    def test_a_column_open_on_the_page_is_the_drawer_in_focus_and_a_column_again_after(self, browser):
+        """Opened in the column layout before focus mode, as it is left open
+        from one generation to the next: the drawer in focus mode, its page
+        scrolling, and the column again once focus is left, with nothing of
+        focus mode's left on it."""
+        page = focus_page(browser, opts={"model_chain_theme_networks_mode": "column"}, more_cards=40)
+        try:
+            drawer_on_lora(page)
+            settle(page, 6)
+            before = page.evaluate(self.DRAWN)
+            enter_focus(page)
+            focused = page.evaluate(self.DRAWN)
+            self.wheel_over_the_page(page, focused)
+            scrolled = page.evaluate(self.DRAWN)
+            page.evaluate("forgeAssistant.shell.toggleFocus()")
+            settle(page, 6)
+            after = page.evaluate(self.DRAWN)
+        finally:
+            page.close()
+
+        assert before["host"] == "grid" and before["position"] == "sticky", before
+        self.assert_the_drawer(focused)
+        assert scrolled["scrolled"] >= 300 and scrolled["workspace"] == 0, scrolled
+        assert after["mode"] is None and after["host"] == "grid" and after["position"] == "sticky", after
+        assert after["inlineTop"] == "", "focus mode's sticky offsets left the drawer alone"
+        assert after["head"]["left"] == before["head"]["left"] and after["page"]["width"] == before["page"]["width"]
+
+    @pytest.mark.parametrize("layout", ["drawer", "column"])
+    def test_on_a_phone_it_is_the_windows_width_as_on_the_page(self, browser, layout):
+        """The drawer in focus mode is the drawer on the page, a phone's
+        included: the window's width there, where focus mode's own rules had
+        kept it at the setting's width beside a strip of the workspace."""
+        widths = []
+        for focus in (False, True):
+            page = focus_page(browser, width=412, height=900,
+                              opts={"model_chain_theme_networks_mode": layout}, more_cards=40)
+            try:
+                if focus:
+                    enter_focus(page)
+                drawer_on_lora(page)
+                settle(page, 6)
+                found = page.evaluate(self.DRAWN)
+            finally:
+                page.close()
+            assert found["position"] == "fixed" and found["pageOnTop"] is True, found
+            assert found["page"]["bottom"] == found["height"] and found["more"] > 1000, found
+            widths.append((found["head"]["left"], found["head"]["width"], found["page"]["width"]))
+
+        assert widths[0] == widths[1] == (0, 412, 412), widths
