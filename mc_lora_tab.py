@@ -17,6 +17,7 @@ import mc_extra_networks_folders_ui
 import mc_lora_images
 import mc_lora_jobs
 import mc_lora_last_used
+import mc_lora_mix_ui
 import mc_lora_render
 from mc_lora_common import lora_directories, opt, report
 from mc_lora_library import get_library
@@ -156,14 +157,16 @@ def create_tab():
                 with gr.TabItem("Images"):
                     gr.HTML(
                         mc_lora_render.notice(
-                            "Gallery images downloaded from a LoRA's details dialog "
-                            "all land in one folder, so they can be managed in one place.",
+                            "Gallery images downloaded from a LoRA's details dialog, and each LoRA's "
+                            "first image a fetch downloads, all land in one folder, so they can be "
+                            "managed in one place.",
                             kind="info",
                         )
                     )
                     image_status = gr.HTML(value=_image_status)
                     with gr.Row():
                         refresh_images = gr.Button("Refresh")
+                        first_images = gr.Button("Download every LoRA's first image")
                         purge_images = gr.Button("Delete every downloaded image", variant="stop")
                     purge_confirm = gr.Checkbox(label="Yes, delete them", value=False)
                     image_message = gr.HTML()
@@ -176,8 +179,10 @@ def create_tab():
                             "through Civitai's <code>by-hash</code> endpoint, and writes the result into the "
                             "library as a CSV. Runs in the background — you can keep generating.<br>"
                             "Text is fetched by default: model name, creator, base model, trigger words, gallery "
-                            "prompts and the model description. Gallery <b>images are never downloaded by a fetch</b> — "
-                            "ask for those from a LoRA's details dialog when you want them.",
+                            "prompts and the model description. Each LoRA's <b>first image</b> — the one Civitai "
+                            "shows first — is downloaded once the fetch is written (Settings → Model Chain: "
+                            "Civitai fetch); the other gallery images are a download from a LoRA's details "
+                            "dialog when you want them.",
                             kind="info",
                         )
                     )
@@ -275,6 +280,19 @@ def create_tab():
                         cancel_button = gr.Button("Cancel running job", variant="stop")
                     queue_status = gr.HTML()
 
+                # ---------------------------------------------------------- mix
+                with gr.TabItem("Mix"):
+                    try:
+                        mc_lora_mix_ui.create_ui()
+                    except Exception:
+                        report("could not build the LoRA mixer")
+                        gr.HTML(
+                            mc_lora_render.notice(
+                                "The mixer could not be built — see the console for details.",
+                                kind="error",
+                            )
+                        )
+
                 # ------------------------------------------------------- monitor
                 with gr.TabItem("Jobs"):
                     with gr.Row():
@@ -321,6 +339,21 @@ def create_tab():
                 return _image_status(), ""
 
             refresh_images.click(fn=do_refresh_images, outputs=[image_status, image_message], show_progress=False)
+
+            def do_first_images():
+                try:
+                    job = mc_lora_jobs.submit_first_images()
+                    note = mc_lora_render.notice(
+                        f"Queued as job #{job.id}: each LoRA's first image the folder does not have yet. "
+                        "The Jobs tab shows how it goes.",
+                        kind="ok",
+                    )
+                except Exception:  # noqa: BLE001
+                    report("could not queue the first images' download")
+                    note = mc_lora_render.notice("The download could not be queued — see the console.", kind="error")
+                return _image_status(), note
+
+            first_images.click(fn=do_first_images, outputs=[image_status, image_message], show_progress=False)
 
             def do_purge_images(confirmed):
                 if not confirmed:

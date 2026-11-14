@@ -422,3 +422,135 @@ stepped-aside guard was in both handlers and the press's cancel had its own
 listener, and a browser sends no click after a cancelled press -- and the
 duplicates were taken out, after which the one guard left fails its test.
 Not run on the user's machine or in a Gecko build.
+
+---
+
+## 9. Each LoRA's first image (2026-11-14)
+
+> "Right now, it seems that it is NOT downloading the first image and detailed
+> prompt of the first image for a lora. Lets make it so that atleast the first
+> image (if available) gets downloaded."
+
+**What was so.** A fetch downloaded no image at all: the standalone's design
+("Gallery images are never downloaded here"), said in the module, the setting
+and the tab. And the first image could be lost before that, in
+`CivitaiClient.gallery_prompts`:
+
+- one picture reaches a scan twice, in the version's own showcase list
+  (`modelVersion.images`, in the order Civitai shows them) and from the gallery
+  endpoint (`/images?modelVersionId=`), and the scan kept the copy seen first
+  (`setdefault` by identity), the showcase one; when that copy came without
+  its generation data the gallery copy's prompt was thrown away;
+- an image without a prompt was not recorded at all, its address included, and
+  the library (`parse_row`) keeps an image only beside a prompt;
+- the order was `createdAt` ascending, which a showcase copy may lack, not the
+  order Civitai shows.
+
+Civitai's own answers could not be read from this session (the host is refused
+by its network policy), so the fix holds whichever of those shapes the user's
+fetches meet.
+
+**What is built.**
+
+- `image_aliases` and `merge_image`: copies of one picture -- the same id, or
+  the same UUID in the address whatever its size options -- are one record,
+  each filling what the other lacks, and a copy with no prompt takes the
+  generation data of one that has it.
+- `CivitaiClient.gallery` returns the prompts and the **cover**: the version's
+  first showcase image, else the first image there is; first among the prompts
+  when it has one, and returned whether it has one or not
+  (`gallery_prompts` is it without the cover, for a caller that needs no
+  more). `Resolution.cover`; the row's `cover_image_url` and `cover_image_id`,
+  owned by the fetcher like its other columns.
+- `LibraryRecord.cover` and `first_image`: the cover, else the first prompt
+  with an image (a row from before, or a hand-made CSV with `first_image_*`).
+- The fetch job ends with `download_first_images` over every row the CSV holds
+  -- the ones a refresh skipped too, so an older library gets its first images
+  -- each picture once, one already in the folder not fetched again, stopped
+  by a cancel; the summary counts them. **Download each LoRA's first gallery
+  image after a fetch** (on) under *Model Chain: Civitai fetch*. The **Images**
+  page's **Download every LoRA's first image** does the same for the whole
+  library (`submit_first_images`).
+- The dialog: a **First image** block heads the Civitai column when the first
+  image came without a prompt, so the gallery column cannot show it
+  (`_first_image`, `first_image_html`). The LoRA viewer takes the first image
+  for its picture when its card has none (`fallback_picture`).
+
+**Tests.** `tests/test_lora_first_image.py`: the real client with its one
+network method stood in by pages shaped like the API's (a showcase copy with
+no generation data, with some but no prompt, without an id; a cover with no
+prompt anywhere; no showcase; the order; the cache), the row and the library,
+the downloads, the fetch job with the setting on and off, the dialog's block
+and the viewer's picture. The fetch tests' `stub` fixture stands in for the
+download, so no fetch test reaches the network. Fourteen mutations each fail a
+test (one survived a first pass -- a showcase copy with generation data but
+no prompt -- and the test was added).
+
+---
+
+## 10. Mixing two LoRAs (2026-11-14)
+
+> "I would like an advanced setting as well, were i can mix lora. This is a
+> whole new feature and should be a new menu in the lora details tab, where i
+> can choose two lora by typing out and prefill (just like extra networks), i
+> can choose their strength, and we can mix them into a single new lora that i
+> can put into a choose directory in the lora directory. I should be forced to
+> choose output folder everytime. I can also choose to name it something
+> different. Once the lora is created, our extension should remember it was
+> made by the extension, i would like a placed holder image until i set one
+> myself."
+
+### 10.1 Decisions
+
+| Question | Decision |
+|---|---|
+| How two LoRAs become one | **Exactly, by putting their ranks side by side.** Forge applies a layer as `strength * alpha / rank * up @ down` (its vendored ComfyUI `weight_adapter/lora.py`); two at `s_a`, `s_b` sum, and the sum is one LoRA whose down matrices are stacked and up matrices set side by side, each up scaled by its `c = s * alpha / rank`. The larger `|c|` goes into the new alpha so the stronger LoRA's matrices are written as they were; only the weaker's up is scaled. Nothing is approximated, so no rank is asked for; an SVD to a smaller rank would lose some of each LoRA and was not built |
+| One-sided layers | Matrices kept, `alpha = |c| * rank`; a negative strength flips the up matrix's sign (exact), so the alpha stays positive |
+| Other patch kinds | `diff`, `diff_b`, `w_norm`, `b_norm` summed at the two strengths; a LoCon Tucker `lora_mid` folded into its down matrix exactly as Forge folds it. DoRA, LoHa, LoKr, OFT, BOFT, GLoRA, `set_weight` and `reshape_weight` refused by name: none mixes exactly |
+| Naming | Forge maps `lora_unet_X`, `diffusion_model.X`, `transformer.X`, `unet.X`, `lycoris_X` and bare `X` to one weight, and two names for one weight in one file overwrite each other in its `load_lora`. Layers are matched by one canonical name and written once, in the first LoRA's spelling; a name twice in one LoRA is refused |
+| Different models | A shared layer of another size refuses the mix, naming it. No shared layer and no naming scheme in common refuses it too (another model, or tools whose spellings would reach one weight twice); no shared layer in the same scheme (one LoRA on attention, one on the MLP) is mixed |
+| Precision | Each layer as its inputs were; half beside bfloat16 written as bfloat16 (range), single beside either as single. bfloat16 by its bits, rounded to nearest even |
+| The file | numpy, no torch or `safetensors` (neither is in the test container, and Forge needs no GPU for this). Metadata of its own: `ss_output_name` the new name (Forge reads the alias from it -- a copied one would have named the mix after its first LoRA), `modelspec.title`, `mc_mix` (JSON: made by, when, the two files, their SHA256 and strengths), and the inputs' `modelspec.architecture`, `modelspec.implementation` and `ss_base_model_version` where they agree. Never the inputs' `sshs_model_hash`, which Forge would take for the mix's hash |
+| The folder | Chosen every time: the picker starts empty on every load and is emptied once a mix is queued (kept on a refusal, which made nothing). It lists the LoRA folder and every folder under it (hidden ones left out), by labels the server looks up afresh at the press, so no path comes from the page |
+| The name | `mix_<first>_<second>`, shown as the box's placeholder once both are chosen; a name no folder can hold is refused, never altered; one in the folder in any case, or one Forge knows a LoRA by, refused before anything is read; the file written beside its place and hard-linked in, so it never replaces one that appeared meanwhile |
+| The pickers | Gradio dropdowns that filter as typed, every safetensors LoRA Forge knows by its place under its LoRA folder. The LoRA viewer's picture-list box was not reused: the Mix page is a Gradio page, and the dropdown is Gradio's own type-ahead |
+| Where it runs | The LoRA jobs' runner (one job at a time, cancellable, on the Jobs page); the page arms a Timer only while its job runs. A refusal found in the job is the job's answer, not its failure: the runner logs a failed job's traceback, and a refusal names the LoRAs and the name chosen |
+| What is remembered | `mixes.json` in the data root (the Mix page's list), the file's own `mc_mix` (the dialog's **Mixed from**, wherever it is moved), and Forge's user metadata `<name>.json` when there is none: a description saying it is a mix, both activation and negative texts joined, the base model where both agree |
+| The placeholder | A drawn card (two discs, each as large as its strength, the name and the two LoRAs under them) saved as `<name>.<samples_format>`, the file Forge's Replace preview writes, so a picture set there replaces it in place. Forge finds a card's picture in a *set* of extensions, in no fixed order, so a placeholder still as drawn is deleted whenever another picture is beside the mix (`sweep_placeholders`: after a mix, when the page lists the mixes, at every start) |
+| Forge's list | `update_available_networks_by_names` with the new name, as Forge's own lookup of an unknown name does; the extra-network browser shows the card after its own refresh |
+| The log | Counts only: "made a LoRA mix: N layer(s), M changed by both, rank up to R"; the job's own lines, on the page, name the LoRAs |
+
+### 10.2 The map
+
+`mc_lora_mix.py` (the file format, the layers, the mix, the names and folders,
+the registry, the placeholder, the user metadata, `check`, `run`, `submit`),
+`mc_lora_mix_ui.py` (the page and its handlers as module functions),
+`mc_lora_tab.py` (the **Mix** page between Fetch and Jobs),
+`mc_lora_render.py` (`mixes_html`, `mix_html`), `mc_lora_details.py` (a mix's
+record, no fetch offered), `mc_lora_settings.on_app_started` (the sweep), and
+the stylesheet's LoRA Details section (`.mc-lora-mixes`).
+
+### 10.3 Tests
+
+`tests/test_lora_mix.py`. The mix is checked against Forge's arithmetic written
+out apart from the mixer (`forge_deltas`, the Tucker fold included): every
+layer of the written file changes the model by `s_a * delta_a + s_b * delta_b`
+-- shared and one-sided layers, negative strengths, kohya, PEFT and Mochi
+spellings of one layer, half and bfloat16, a Tucker middle, summed diffs,
+disjoint layers in one scheme. Then the refusals; the request (folders, the
+pickers, every refusal before anything is read, a name in any case, the
+finished file never over another); making one (its metadata, the registry,
+Forge told, the placeholder in Forge's images format, yours replacing it in
+place or beside it, the user metadata); the job (its summary, no name or path
+in the log, a refusal as its answer); the page (the folder emptied once
+queued, the name's placeholder, the tab's dropdowns); the dialog. Twenty-nine
+mutations each fail a test (one survived a first pass -- a zero-strength LoRA's
+diff patches -- and the test was extended).
+
+### 10.4 Open
+
+- Not run on the user's machine, on a real Forge or Gradio page, or with real
+  LoRAs: the arithmetic is checked against Forge's formula as read from its
+  source, not against a generation.
+- A mix is the two ranks together; a smaller file would need an SVD and would
+  no longer be exact. Not built.

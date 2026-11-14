@@ -19,9 +19,20 @@ unmistakable).
 
 What a scan collects is *text*: model name, base model, trigger words, gallery
 prompts and - fetched by default - the model's description, converted from
-Civitai's HTML by :mod:`.descriptions`. Gallery images are never downloaded here;
-only the URL of the image behind each prompt is recorded, so downloading one
-stays a separate, deliberate request.
+Civitai's HTML by :mod:`.descriptions`. Gallery images are never downloaded here:
+the URL of the image behind each prompt is recorded, and the version's first
+image -- the one Civitai shows first, its cover -- as the row's cover whether or
+not it carries a prompt. The fetch *job* downloads each row's first image once
+the scan is written (``mc_lora_jobs``); the rest stay a download from the LoRA's
+dialog.
+
+One picture can reach a scan twice: in the version's own showcase list and
+again from the gallery endpoint. The two copies are one record here, each
+filling what the other lacks -- the showcase copy has the place Civitai shows
+it in, the gallery copy usually the generation data and so the prompt
+(:func:`image_aliases`, :func:`merge_image`). Keeping only the first copy, as
+the first build did, threw away the cover's prompt whenever its showcase copy
+came without one, and with no prompt the cover was not recorded at all.
 """
 
 from __future__ import annotations
@@ -119,6 +130,10 @@ BASE_COLUMNS = [
     "civitai_creator",
     "civitai_url",
     "trigger_words",
+    # The version's first image, the one Civitai shows first: recorded whether
+    # or not it carries a prompt, so the fetch can download it.
+    "cover_image_url",
+    "cover_image_id",
     "status",
     "note",
     # Text details, kept at the end of the fixed columns: they are long, and a
@@ -429,6 +444,43 @@ def image_key(image: dict[str, Any]) -> str:
     return ""
 
 
+# The UUID in an image's address (image.civitai.com/<account>/<uuid>/<options>/<file>),
+# the same in a showcase copy and a gallery copy whatever their size options.
+_IMAGE_GUID_RE = re.compile(r"/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:/|$)", re.IGNORECASE)
+
+
+def image_aliases(image: dict[str, Any]) -> list[str]:
+    """Every name one picture can be known by: its id, and the UUID in its
+    address. Two records sharing any of them are one picture."""
+    aliases: list[str] = []
+    raw = image.get("id")
+    if raw is not None and str(raw).strip():
+        aliases.append(f"id:{str(raw).strip()}")
+    match = _IMAGE_GUID_RE.search(clean_cell(image.get("url")))
+    if match:
+        aliases.append(f"guid:{match.group(1).lower()}")
+    if not aliases:
+        aliases.append(image_identity(image))
+    return aliases
+
+
+def _empty(value: Any) -> bool:
+    return value is None or (isinstance(value, (str, list, dict, tuple)) and not value)
+
+
+def merge_image(kept: dict[str, Any], other: dict[str, Any]) -> None:
+    """Fill what ``kept`` lacks from another copy of the same picture: a field it
+    does not have, or has empty, and its generation data when ``kept`` carries
+    no prompt and the other copy does."""
+    for key, value in other.items():
+        if _empty(kept.get(key)) and not _empty(value):
+            kept[key] = value
+    if not extract_positive_prompt(kept) and extract_positive_prompt(other):
+        for key, value in other.items():
+            if key == "meta" or normalize_key(key) in DESIRED_PROMPT_KEYS:
+                kept[key] = value
+
+
 def image_sort_key(image: dict[str, Any]) -> tuple[str, int, str]:
     created = clean_cell(image.get("createdAt"))
     try:
@@ -474,7 +526,7 @@ class CivitaiClient:
         self.session.mount("http://", adapter)
 
         self.model_cache: dict[int, dict[str, Any]] = {}
-        self.gallery_cache: dict[int, tuple[PromptImage, ...]] = {}
+        self.gallery_cache: dict[int, tuple[tuple[PromptImage, ...], PromptImage | None]] = {}
 
     def close(self) -> None:
         try:
@@ -573,18 +625,45 @@ class CivitaiClient:
         return merged
 
     def gallery_prompts(self, version_id: int, *, embedded_images: Any, max_images: int) -> tuple[tuple[PromptImage, ...], str | None]:
+        prompts, _cover, warning = self.gallery(version_id, embedded_images=embedded_images, max_images=max_images)
+        return prompts, warning
+
+    def gallery(self, version_id: int, *, embedded_images: Any, max_images: int) -> tuple[tuple[PromptImage, ...], PromptImage | None, str | None]:
+        """The version's gallery prompts and its cover, and a warning when the
+        gallery could not be read whole. The cover -- the version's first
+        showcase image, else the first image there is -- comes first among the
+        prompts when it has one, and is returned whether it has one or not."""
         cached = self.gallery_cache.get(version_id)
         if cached is not None and max_images == 0:
-            return cached, None
+            return cached[0], cached[1], None
 
-        images_by_identity: dict[str, dict[str, Any]] = {}
+        records: list[dict[str, Any]] = []
+        known: dict[str, int] = {}
+
+        def add(image: dict[str, Any]) -> int:
+            aliases = image_aliases(image)
+            for alias in aliases:
+                if alias in known:
+                    index = known[alias]
+                    merge_image(records[index], image)
+                    break
+            else:
+                index = len(records)
+                records.append(dict(image))
+            for alias in aliases:
+                known.setdefault(alias, index)
+            return index
 
         # Seed with the version's own showcase images so a transient /images
-        # failure does not discard prompt metadata we already hold.
+        # failure does not discard prompt metadata we already hold; the first
+        # of them is the cover, the picture Civitai shows first.
+        cover_index: int | None = None
         if isinstance(embedded_images, list):
             for image in embedded_images:
                 if isinstance(image, dict):
-                    images_by_identity.setdefault(image_identity(image), image)
+                    index = add(image)
+                    if cover_index is None and image_url(image):
+                        cover_index = index
 
         fetched_count = 0
         seen_pages: set[tuple[str, ...]] = set()
@@ -627,7 +706,7 @@ class CivitaiClient:
             for image in items:
                 if max_images > 0 and fetched_count >= max_images:
                     break
-                images_by_identity.setdefault(image_identity(image), image)
+                add(image)
                 fetched_count += 1
 
             if (max_images > 0 and fetched_count >= max_images) or not items:
@@ -668,7 +747,12 @@ class CivitaiClient:
 
             break
 
-        ordered = sorted(images_by_identity.values(), key=image_sort_key)
+        cover = records[cover_index] if cover_index is not None else None
+        ordered = sorted((record for record in records if record is not cover), key=image_sort_key)
+        if cover is None:
+            cover = next((record for record in ordered if image_url(record)), None)
+        if cover is not None:
+            ordered = [cover, *(record for record in ordered if record is not cover)]
         if max_images > 0:
             ordered = ordered[:max_images]
 
@@ -678,10 +762,14 @@ class CivitaiClient:
             if prompt:
                 entries.append(PromptImage(prompt, image_url(image), image_key(image)))
 
+        found = None
+        if cover is not None and image_url(cover):
+            found = PromptImage(extract_positive_prompt(cover), image_url(cover), image_key(cover))
+
         result = tuple(entries)
         if max_images == 0 and warning is None:
-            self.gallery_cache[version_id] = result
-        return result, warning
+            self.gallery_cache[version_id] = (result, found)
+        return result, found, warning
 
 
 # ---------------------------------------------------------------- resolution
@@ -702,6 +790,7 @@ class Resolution:
     model_description: str = ""
     version_description: str = ""
     reason: str = ""
+    cover: PromptImage | None = None
 
     @property
     def resolved(self) -> bool:
@@ -779,7 +868,13 @@ def resolve_hash(
     creator_name = clean_cell(creator.get("username")) if isinstance(creator, dict) else ""
     url = f"https://civitai.com/models/{model_id}?modelVersionId={version_id}" if model_id else ""
 
-    prompts, warning = client.gallery_prompts(version_id, embedded_images=version.get("images"), max_images=max_images)
+    embedded = version.get("images")
+    gallery = getattr(client, "gallery", None)
+    if callable(gallery):
+        prompts, cover, warning = gallery(version_id, embedded_images=embedded, max_images=max_images)
+    else:
+        prompts, warning = client.gallery_prompts(version_id, embedded_images=embedded, max_images=max_images)
+        cover = next((entry for entry in prompts if entry.image_url), None)
 
     common = {
         "model_name": model_name,
@@ -793,6 +888,7 @@ def resolve_hash(
         "url": url,
         "model_description": html_to_text(parent_model.get("description")) if fetch_descriptions else "",
         "version_description": html_to_text(version.get("description")) if fetch_descriptions else "",
+        "cover": cover,
     }
 
     if warning:
@@ -928,6 +1024,8 @@ def row_for(relative_name: str, sha256: str, addnet: str, resolution: Resolution
         "civitai_creator": resolution.creator,
         "civitai_url": resolution.url,
         "trigger_words": ", ".join(resolution.trigger_words),
+        "cover_image_url": resolution.cover.image_url if resolution.cover else "",
+        "cover_image_id": resolution.cover.image_id if resolution.cover else "",
         "status": resolution.status,
         "note": resolution.reason,
         "model_description": resolution.model_description,

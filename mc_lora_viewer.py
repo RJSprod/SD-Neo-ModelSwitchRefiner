@@ -143,10 +143,13 @@ def triggers_of(details: dict) -> list[str]:
 
 
 def fallback_picture(details: dict) -> str:
-    """The first downloaded Civitai example that is a picture, as a data URI."""
+    """The LoRA's first image, else the first downloaded Civitai example that is
+    a picture, as a data URI."""
     import mc_lora_images
 
-    for url, image_id in details.get("prompt_images", ()) or ():
+    first = details.get("first_image")
+    candidates = ([tuple(first)] if first else []) + list(details.get("prompt_images", ()) or ())
+    for url, image_id in candidates:
         try:
             path = mc_lora_images.find_local(url, image_id)
             if path is None or mc_lora_images.is_video(path):

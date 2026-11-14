@@ -88,8 +88,25 @@ class StubClient:
 
 @pytest.fixture
 def stub(monkeypatch, lora_root):
-    """Civitai knows the hashes given; the client each scan built is kept."""
-    created = {}
+    """Civitai knows the hashes given; the client each scan built is kept.
+
+    A fetch job downloads each LoRA's first image once its CSV is written:
+    here a download writes a small file where the real one would, and is
+    recorded in ``created["downloads"]``, so no test of a fetch reaches the
+    network."""
+    import mc_lora_images
+
+    created = {"downloads": []}
+
+    def fake_download(url, image_id="", *, directory=None, cancel=None, **_kwargs):
+        created["downloads"].append((url, image_id))
+        folder = directory or mc_lora_images.image_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{mc_lora_images.stem_for(url, image_id)}.jpeg"
+        target.write_bytes(b"\xff\xd8 first image")
+        return mc_lora_images.DownloadResult(True, target, f"Saved {target.name}")
+
+    monkeypatch.setattr(mc_lora_images, "download", fake_download)
 
     def install(known, client_class=StubClient):
         def factory(**kwargs):

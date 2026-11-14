@@ -70,6 +70,10 @@ PROMPT_COLUMN_RE = re.compile(r"^(?:positive_)?prompt(?:_?(\d+))?$")
 # too so a hand-made CSV can supply images without matching our exact naming.
 PROMPT_IMAGE_URL_RE = re.compile(r"^(?:prompt_)?image_url_?(\d+)$")
 PROMPT_IMAGE_ID_RE = re.compile(r"^(?:prompt_)?image_id_?(\d+)$")
+# The version's first image, which the fetcher records whether or not it has a
+# prompt (``first_image_*`` accepted from a hand-made CSV).
+COVER_URL_COLUMNS = ("cover_image_url", "first_image_url")
+COVER_ID_COLUMNS = ("cover_image_id", "first_image_id")
 
 # Separators used inside a single "trigger words" cell.
 TRIGGER_SPLIT_RE = re.compile(r"\s*[,;\n]\s*")
@@ -121,6 +125,7 @@ class LibraryRecord:
     note: str = ""
     trigger_words: tuple[str, ...] = ()
     entries: tuple[PromptEntry, ...] = ()
+    cover: PromptEntry | None = None
     negative_prompts: tuple[str, ...] = ()
     extras: dict[str, str] = field(default_factory=dict)
     raw: dict[str, str] = field(default_factory=dict)
@@ -132,6 +137,16 @@ class LibraryRecord:
     @property
     def prompts(self) -> tuple[str, ...]:
         return tuple(entry.text for entry in self.entries)
+
+    @property
+    def first_image(self) -> PromptEntry | None:
+        """The LoRA's first image: the version's cover, as the fetcher records
+        it, else the first prompt that has an image (a row from before covers
+        were recorded, or a hand-made CSV). Its text is the prompt when it has
+        one, and empty when it has none."""
+        if self.cover is not None and self.cover.image_url:
+            return self.cover
+        return next((entry for entry in self.entries if entry.image_url), None)
 
     @property
     def has_description(self) -> bool:
@@ -214,6 +229,8 @@ def parse_row(row: dict[str, str], *, source: str, row_number: int) -> LibraryRe
         return ""
 
     raw_path = take(PATH_COLUMNS)
+    cover_url = take(COVER_URL_COLUMNS)
+    cover_id = take(COVER_ID_COLUMNS)
     model_name = take(NAME_COLUMNS)
     url = take(URL_COLUMNS)
     description = take(DESCRIPTION_COLUMNS)
@@ -266,6 +283,12 @@ def parse_row(row: dict[str, str], *, source: str, row_number: int) -> LibraryRe
         for index in sorted(prompt_by_index)
     )
 
+    cover = None
+    if cover_url:
+        prompt = next((entry.text for entry in entries if entry.image_url == cover_url
+                       or (cover_id and entry.image_id == cover_id)), "")
+        cover = PromptEntry(prompt, cover_url, cover_id)
+
     negatives: list[str] = []
     for column in NEGATIVE_COLUMNS:
         value = normalized.get(column, "")
@@ -302,6 +325,7 @@ def parse_row(row: dict[str, str], *, source: str, row_number: int) -> LibraryRe
         note=peek(NOTE_COLUMNS),
         trigger_words=tuple(triggers),
         entries=tuple(entries),
+        cover=cover,
         negative_prompts=tuple(negatives),
         extras=extras,
         raw=display,

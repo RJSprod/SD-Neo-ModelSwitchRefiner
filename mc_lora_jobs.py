@@ -13,7 +13,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mc_lora_common import log, report
+from mc_lora_common import log, opt, report
+
+OPT_FIRST_IMAGE = "model_chain_lora_download_first_image"
+"""Settings → Model Chain: Civitai fetch; read here so a fetch job knows."""
 
 MAX_LOG_LINES = 400
 
@@ -356,9 +359,86 @@ def submit_scan(
             parts.append(f"{result.failed} unresolved")
         if result.cancelled:
             parts.append("cancelled early")
+
+        # Every row the CSV now holds, the ones a refresh skipped included, so a
+        # library fetched before this was built gets its first images too.
+        if bool(opt(OPT_FIRST_IMAGE, True)) and not result.cancelled and not job.cancelled:
+            from mc_lora_library import parse_row
+
+            records = [parse_row(row, source=output_path.name, row_number=index)
+                       for index, row in enumerate(result.rows, start=2)]
+            saved, present, failed = download_first_images(job, records)
+            if saved or failed or present:
+                piece = f"first images: {saved} downloaded, {present} already here"
+                if failed:
+                    piece += f", {failed} failed"
+                parts.append(piece)
         return f"{output_path.name}: " + ", ".join(parts)
 
     return MANAGER.submit("scan", f"Civitai fetch · {folder_path.name or folder_path}", target)
+
+
+def first_images(records) -> list[tuple[str, str]]:
+    """``(url, image_id)`` of each resolved record's first image, each picture once."""
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for record in records:
+        if record is None or not record.resolved:
+            continue
+        image = record.first_image
+        if image is None or not image.image_url:
+            continue
+        key = image.image_id or image.image_url
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((image.image_url, image.image_id))
+    return pairs
+
+
+def download_first_images(job: Job, records) -> tuple[int, int, int]:
+    """Download each record's first image the image folder does not hold yet:
+    ``(downloaded, already there, failed)``. Stops when the job is cancelled."""
+    import mc_lora_images
+
+    pairs = first_images(records)
+    if not pairs:
+        return 0, 0, 0
+    folder = mc_lora_images.image_dir()
+    missing = [pair for pair in pairs if mc_lora_images.find_local(pair[0], pair[1], directory=folder) is None]
+    present = len(pairs) - len(missing)
+    job.log_line(f"First images: {len(missing)} to download, {present} already in the image folder")
+    saved = failed = 0
+    for index, (url, image_id) in enumerate(missing, start=1):
+        if job.cancelled:
+            break
+        job.set_progress(index, len(missing), f"first image {index}/{len(missing)}")
+        result = mc_lora_images.download(url, image_id, directory=folder, cancel=job.cancel_event)
+        if result.skipped:
+            present += 1
+        elif result.ok:
+            saved += 1
+        else:
+            failed += 1
+            job.log_line(f"A first image could not be downloaded: {result.message}")
+    return saved, present, failed
+
+
+def submit_first_images() -> Job:
+    """Download the first image of every LoRA in the library that has one."""
+    from mc_lora_library import get_library
+
+    def target(job: Job) -> str:
+        records = get_library().records
+        saved, present, failed = download_first_images(job, records)
+        if not (saved or present or failed):
+            return "No LoRA in the library has a first image recorded"
+        parts = [f"{saved} downloaded", f"{present} already here"]
+        if failed:
+            parts.append(f"{failed} failed")
+        return "First images: " + ", ".join(parts)
+
+    return MANAGER.submit("images", "Download first images", target)
 
 
 def submit_image_downloads(entries, *, label: str = "") -> Job:
