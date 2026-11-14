@@ -516,9 +516,10 @@ Let's make it so that never happens." Built:
   workspace's own tab bar along the window's top (docs/22 §3.37); the theme's
   two drawers go with it. The quick settings drawer is marked
   `forge-assistant-focus-keep` so focus's rule leaves it in the layout, and
-  under focus it hangs from the bar's bottom edge
-  (`--forge-assistant-focus-top`), a step above the workspace, and is not drawn
-  while the bar is hidden. The extra networks drawer, which focus mode used to
+  under focus it hangs from the bar's bottom edge, a step above the workspace,
+  and is not drawn while the bar is hidden. (From the workspace's top,
+  `--forge-assistant-focus-top`, until 2026-11-14; from the header's height
+  since, the bar's bottom whether it is shown or peeking: docs/22 §3.56.) The extra networks drawer, which focus mode used to
   keep out of the workspace, opens with the bar shown or peeking as on the
   page, over the workspace's right edge from the bar's bottom, in both layouts
   (the column layout's grid is not drawn in focus mode). In focus mode the bar
@@ -1163,7 +1164,13 @@ mouse is over shows its band, under `@media (hover: hover)`: a finger's tap leav
 **In focus mode** (docs/22 §3.52): the drawer's head is marked
 `forge-assistant-focus-keep`, so an open drawer keeps a peeking bar, and itself,
 until it is closed; and Forge's popup, lightbox and context menu are drawn over the
-focused workspace.
+focused workspace. Since 2026-11-14 (docs/22 §3.56) the column layout's rules are the
+page's alone (`body:not(.forge-assistant-focused)`), so in focus mode the column is
+the drawer and its page scrolls -- undone property by property before, its
+`align-self: start` had left the page as tall as its cards over its own head -- and
+the drawer hangs from the header's height, the bar's bottom whether it is shown or
+peeking, where a drawer opened from the peeking bar had its title and close under it;
+the quick settings drawer the same, its first settings having been under it.
 
 Tests: `TestWhatThePromptHas` (Chromium: a typed tag dims its card with the name over
 the overlay, `<lyco:...>` and any weight count, a word or a longer name does not; a
