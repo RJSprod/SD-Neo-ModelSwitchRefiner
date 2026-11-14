@@ -385,6 +385,24 @@ def image_status_html(*, downloaded: bool, name: str, url: str) -> str:
     return notice(f"The gallery image behind this prompt is not downloaded yet{origin}.", kind="info")
 
 
+def first_image_html(*, thumb: str, saved: bool, video: bool, url: str) -> str:
+    """The LoRA's first image -- the one Civitai shows first -- where the gallery
+    does not show it, because it came without a prompt."""
+    source = urlparse(url).netloc if url else ""
+    origin = f' <span class="mc-lora-muted">({escape(source)})</span>' if source else ""
+    if thumb:
+        body = f'<div class="mc-lora-first-image"><img src="{thumb}" alt="The LoRA\'s first image" loading="lazy"></div>'
+    elif saved:
+        body = notice(("The video is saved" if video else "The image is saved") + f" in the image folder{origin}.", kind="ok")
+    else:
+        body = notice(
+            f"Not downloaded yet{origin}. The next fetch downloads it, or <i>Download every LoRA's first "
+            "image</i> on the LoRA Details tab's Images page.",
+            kind="info",
+        )
+    return section_html("First image", body, note="no prompt with it", classes="mc-lora-first")
+
+
 def prompt_cards_html(cards, *, total: int, tab: str, bridge: str) -> str:
     """Every gallery prompt as a card - the image when it is saved, the prompt,
     and its actions - like the media grid of Wan2GP's Inspect view.
@@ -447,6 +465,63 @@ def prompt_cards_html(cards, *, total: int, tab: str, bridge: str) -> str:
         f'<div class="mc-lora-cards" data-mc-lora-tab="{escape(tab)}" data-mc-lora-bridge="{escape(bridge)}">{"".join(articles)}</div>'
         f"{more}</details>"
     )
+
+
+def _strength(value) -> str:
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return escape(value)
+
+
+def mixes_html(entries) -> str:
+    """The mixes made on the Mix page, newest first: each one's name, folder,
+    what it was mixed from, and whether its picture is the placeholder."""
+    if not entries:
+        return notice("No mixes made here yet.", kind="empty")
+    pictures = {
+        "placeholder": "Placeholder picture — set your own with <i>Replace preview</i> in its card's dialog",
+        "yours": "Your picture",
+        "none": "No picture",
+    }
+    rows = []
+    for entry in entries:
+        inputs = " + ".join(
+            f"{escape(item.get('name', ''))} ×{_strength(item.get('strength'))}" for item in entry.get("inputs") or []
+        )
+        made = escape(str(entry.get("made", ""))[:16].replace("T", " "))
+        size = entry.get("size")
+        facts = [f"from {inputs}" if inputs else ""]
+        if entry.get("rank"):
+            facts.append(f"rank {int(entry['rank'])}")
+        if isinstance(size, (int, float)) and size > 0:
+            facts.append(f"{size / (1024 * 1024):.1f} MB")
+        state = pictures.get(entry.get("picture", "none"), "")
+        if not entry.get("present", True):
+            state = "Not where it was made: moved or deleted"
+        rows.append(
+            '<article class="mc-lora-mix">'
+            f'<div class="mc-lora-mix-head"><b>{escape(entry.get("name", ""))}</b> '
+            f'{_pill(str(entry.get("folder", "")))} <span class="mc-lora-muted">{made}</span></div>'
+            f'<div class="mc-lora-mix-from">{" · ".join(fact for fact in facts if fact)}</div>'
+            f'<div class="mc-lora-muted">{state}</div>'
+            "</article>"
+        )
+    return f'<div class="mc-lora-mixes">{"".join(rows)}</div>'
+
+
+def mix_html(record) -> str:
+    """A LoRA's details dialog, for a LoRA the mixer made: what from."""
+    inputs = record.get("inputs") or []
+    rows = "".join(
+        '<div class="mc-lora-fact">'
+        f'<span class="mc-lora-fact-key">×{_strength(item.get("strength"))}</span>'
+        f'<span class="mc-lora-fact-value">{escape(item.get("name", ""))}</span></div>'
+        for item in inputs
+    )
+    made = escape(str(record.get("made", ""))[:16].replace("T", " "))
+    note = f"made here {made}" if made else "made here"
+    return section_html("Mixed from", f'<div class="mc-lora-facts">{rows}</div>', note=note, classes="mc-lora-mixed")
 
 
 def library_summary_html(stats: dict) -> str:

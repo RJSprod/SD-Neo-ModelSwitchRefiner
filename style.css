@@ -11820,6 +11820,56 @@ details.mc-lora-more[open] > summary {
     font-size: var(--text-xs);
 }
 
+/* The LoRA's first image when it came without a prompt, so the gallery column
+   does not show it: a picture as tall as a card's, in the Civitai column. */
+.edit-user-metadata .mc-lora-first-image,
+#mc-lora-details .mc-lora-first-image {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 16rem;
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+    background: var(--background-fill-primary);
+}
+
+.edit-user-metadata .mc-lora-first-image img,
+#mc-lora-details .mc-lora-first-image img {
+    max-width: 100%;
+    max-height: 100%;
+    margin: 0;
+    object-fit: contain;
+}
+
+/* The Mix page's list of the mixes made here: one compact card each. */
+#mc-lora-details .mc-lora-mixes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+    gap: 8px;
+}
+
+#mc-lora-details .mc-lora-mix {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-sm);
+    background: var(--background-fill-secondary);
+    font-size: var(--text-sm);
+}
+
+#mc-lora-details .mc-lora-mix-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+#mc-lora-details .mc-lora-mix-from {
+    overflow-wrap: anywhere;
+}
+
 .mc-lora-card-head {
     display: flex;
     flex-wrap: wrap;

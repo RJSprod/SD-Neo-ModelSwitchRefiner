@@ -249,12 +249,23 @@ def gather(page, name: str, *, item: dict | None = None, hash_files: bool = True
             if negative not in negatives:
                 negatives.append(negative)
 
+    # The first image of the best match, the one Civitai shows first.
+    first = next((record.first_image for record in records if record.first_image is not None), None)
+
     identity = {
         "SHA256": sha256 or ("not computed" if filename else ""),
         "Forge hash": item.get("shorthash") or "",
     }
 
     user_metadata = item.get("user_metadata") or {}
+    # A LoRA the Mix page made says so in its own metadata, wherever it was
+    # moved to: Civitai has nothing for it, so no fetch is offered.
+    try:
+        import mc_lora_mix
+
+        mixed = mc_lora_mix.mix_record(item.get("metadata") or {})
+    except Exception:
+        mixed = None
 
     return {
         "records": records,
@@ -262,6 +273,7 @@ def gather(page, name: str, *, item: dict | None = None, hash_files: bool = True
         "descriptions": descriptions,
         "prompts": prompts,
         "prompt_images": prompt_images,
+        "first_image": (first.image_url, first.image_id) if first is not None else None,
         "prompt_sources": prompt_sources,
         "triggers": triggers,
         "negatives": negatives,
@@ -270,7 +282,8 @@ def gather(page, name: str, *, item: dict | None = None, hash_files: bool = True
         "filename": filename,
         "architecture": _architecture(filename),
         "activation": str(user_metadata.get("activation text", "") or ""),
-        "fetch": _fetch_plan(filename, records),
+        "fetch": {} if mixed else _fetch_plan(filename, records),
+        "mix": mixed,
     }
 
 
@@ -355,6 +368,20 @@ def _cards(prompts: list[str], prompt_images: list) -> tuple[list[dict], int]:
             }
         )
     return cards, saved
+
+
+def _first_image(first, prompt_images: list) -> str:
+    """The first image's block, only where the gallery does not already show it
+    as its first card: a first image with no prompt."""
+    if not first or not first[0]:
+        return ""
+    if prompt_images and tuple(prompt_images[0]) == tuple(first):
+        return ""
+    url, image_id = first
+    local = mc_lora_images.find_local(url, image_id)
+    video = local is not None and mc_lora_images.is_video(local)
+    thumb = mc_lora_images.thumbnail_data_uri(local) if local is not None and not video else ""
+    return mc_lora_render.first_image_html(thumb=thumb, saved=local is not None, video=video, url=url)
 
 
 def _gallery(prompts: list[str], prompt_images: list, *, tabname: str, bridge: str) -> tuple[str, str]:
@@ -696,6 +723,8 @@ def build_dialog(editor) -> None:
             )
         side_html = "".join(
             [
+                mc_lora_render.mix_html(data["mix"]) if data.get("mix") else "",
+                _first_image(data.get("first_image"), prompt_images),
                 mc_lora_render.triggers_html([word for word, _ in triggers], target=target, active=active),
                 texts,
                 mc_lora_render.negative_html(data["negatives"], tab=tabname),
@@ -737,9 +766,12 @@ def build_dialog(editor) -> None:
         if data["descriptions"]:
             pieces.append("description")
 
+        if data.get("mix"):
+            pieces.insert(0, "a mix made here")
         return [
             mc_lora_render.header_html(records=records, how=data["how"]),
-            mc_lora_render.column_title_html("Civitai", ", ".join(pieces) if records else "nothing in the library"),
+            mc_lora_render.column_title_html("Civitai", ", ".join(pieces) if records or data.get("mix")
+                                             else "nothing in the library"),
             mc_lora_render.facts_html(records, identity=data["identity"], architecture=data["architecture"]),
             gr.update(visible=bool(plan)),
             gr.update(value=fetch_label, interactive=bool(plan)),

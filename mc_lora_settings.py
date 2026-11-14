@@ -73,6 +73,7 @@ OPT_RETRY_UNRESOLVED = "model_chain_lora_retry_unresolved"
 OPT_REQUEST_DELAY = "model_chain_lora_request_delay"
 OPT_REQUEST_TIMEOUT = "model_chain_lora_request_timeout"
 OPT_MAX_IMAGES = "model_chain_lora_max_images"
+OPT_FIRST_IMAGE = "model_chain_lora_download_first_image"
 OPT_BASE_MODEL = "model_chain_lora_base_model_filter"
 OPT_REQUIRE_LABEL = "model_chain_lora_require_explicit_label"
 
@@ -350,8 +351,7 @@ def fetch_settings(shared) -> dict:
             True,
             "Fetch the model description",
         ).info(
-            "Costs one request per model page; the page also names the creator. Gallery images "
-            "are never downloaded by a fetch"
+            "Costs one request per model page; the page also names the creator"
         ),
         OPT_BACKFILL: OptionInfo(
             True,
@@ -378,7 +378,15 @@ def fetch_settings(shared) -> dict:
             "Gallery images inspected per version (0 = all)",
             _slider(gr),
             {"minimum": 0, "maximum": 500, "step": 10},
-        ).info("Each inspected image's prompt is kept; the images themselves are not fetched"),
+        ).info("Each inspected image's prompt is kept; only the first image is downloaded, by the setting below"),
+        OPT_FIRST_IMAGE: OptionInfo(
+            True,
+            "Download each LoRA's first gallery image after a fetch",
+        ).info(
+            "The image Civitai shows first for the version, whether or not it has a prompt, into the "
+            "image folder; one already there is not fetched again. The others stay a download from "
+            "the LoRA's dialog"
+        ),
         OPT_BASE_MODEL: OptionInfo(
             "",
             "Only accept these base models",
@@ -605,3 +613,11 @@ def on_app_started(_demo=None, _app=None) -> None:
         get_library().ensure_loaded()
     except Exception:
         report("could not load the CSV library")
+    # A mix's placeholder picture gives way to one of yours set while the
+    # WebUI was down (the Mix page sweeps again whenever it lists the mixes).
+    try:
+        import mc_lora_mix
+
+        mc_lora_mix.sweep_placeholders()
+    except Exception:
+        report("could not look over the LoRA mixes' placeholder pictures")

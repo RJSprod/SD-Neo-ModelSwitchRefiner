@@ -8169,7 +8169,8 @@ description and version notes, its gallery prompts and the images behind them �
 a fetch that fills the library, and Forge's own LoRA dialog redrawn to show all
 of it beside Forge's fields, **the width of the window**. On by default, under
 **Settings → Model Chain: LoRA Details**; its own tab, **LoRA Details**, holds
-the library, the fetch, the folders per UI Preset and the jobs.
+the library, the fetch, the folders per UI Preset, the **Mix** page that makes
+one LoRA out of two, and the jobs.
 `docs/26-lora-details.md` is the record of the design.
 
 ### The dialog
@@ -8196,7 +8197,12 @@ rebuilt — its components are moved, so every field saves as before.
   negative**; and, folded away, **All fields** of the row and the **Raw CSV
   row**. For a LoRA the library has nothing for, **Fetch from Civitai** looks
   up the LoRAs in its folder the library does not have yet, in the background;
-  for one Civitai had nothing for last time, **Retry on Civitai**.
+  for one Civitai had nothing for last time, **Retry on Civitai**. A LoRA's
+  **First image** heads the column when it came without a prompt, so the
+  gallery prompts cannot show it (once a fetch has downloaded it, the picture;
+  until then, where it is to come from). A LoRA the **Mix** page made says
+  **Mixed from** with its two LoRAs and their strengths, and is offered no
+  Civitai fetch: Civitai has nothing for it.
 - **Gallery prompts** — only when there are any. A selector with ‹ › through
   every prompt (a MOSS-Image layout prompt is named by its caption); the
   selected prompt large beside its image, with **Download this image**,
@@ -8239,7 +8245,16 @@ descriptions**, **Fill in text details missing from rows already in the
 library**, the base-model gate (**Only accept these base models**, several
 comma-separated; **Require an explicit base-model label**), the API key, the
 gallery images inspected per version, the delay and the timeout. **Start fetch**
-queues a job; **Cancel running job** stops it; the **Jobs** page shows each
+queues a job, which ends by downloading **each LoRA's first image** — the one
+Civitai shows first for the version, whether or not it has a prompt — for every
+row the CSV holds, the ones a refresh skipped included, so a library fetched
+before this came gets its first images on its next fetch (**Download each
+LoRA's first gallery image after a fetch**, on). One picture reaches a fetch
+twice — in the version's showcase and from its gallery — and the two copies are
+one record, each filling in what the other lacks, so the first image keeps its
+prompt when Civitai has one for it; until 2026-11-14 the copy without the
+generation data won, and the first image was then left out of the library
+altogether. **Cancel running job** stops it; **Cancel running job** stops it; the **Jobs** page shows each
 job's progress, log and outcome. Every file is hashed and looked up by hash;
 a version whose own file hashes disagree with the file is refused; a MOSS-Image
 LoRA is recognised by its tensor names (`layers.N.proj.ffn_up_gate`,
@@ -8255,8 +8270,42 @@ Downloaded into one flat folder, `images/` under the data root or **Folder for
 downloaded gallery images**, as `civitai-<id>.<ext>`; whether an image is there
 is read from disk, so one you delete is offered again. Thumbnails for the cards
 are made once, under `cache/thumbs`. The size cap and the timeout are settings;
-the tab's **Images** page counts them and empties the folder after a
-confirmation.
+the tab's **Images** page counts them, **Download every LoRA's first image**
+fetches the first image of every LoRA in the library that the folder does not
+hold yet, and the folder is emptied after a confirmation. The LoRA viewer takes
+a LoRA's first image for its picture when its card has none.
+
+### Mixing two LoRAs
+
+The tab's **Mix** page makes one new LoRA file out of two: **First LoRA** and
+**Second LoRA**, each typed to filter Forge's LoRAs by where they are under the
+LoRA folder, each with its **Strength** (−5 to 5); **Into folder**, the LoRA
+folder or any folder under it, which starts empty every time the page loads and
+again after every mix, so it is chosen for each one; and **Name**, which shows
+`mix_<first>_<second>` once both are chosen and is used when left empty. **Mix**
+runs in the background (the **Jobs** page shows it too); **↻** reads the LoRA
+folders again.
+
+- **Exact.** The new LoRA changes the model by exactly what the two would
+  together at those strengths: the two LoRAs' ranks side by side, nothing
+  approximated. Its rank is the two ranks together, its size about theirs
+  together. A layer both change with different sizes means they were made for
+  different models, and the mix is refused, naming the layer. So are DoRA,
+  LoHa, LoKr, OFT and GLoRA LoRAs, which cannot be mixed exactly, and a file
+  that is not safetensors.
+- **One layer, however it is spelled.** One trainer writes
+  `lora_unet_layers_0_attn_qkv`, another `diffusion_model.layers.0.attn.qkv`;
+  Forge reads both as one layer, so the mix writes it once.
+- **Never over a file.** A name already in the folder, whatever its case, or
+  one Forge already knows a LoRA by, is refused before anything is read.
+- **Remembered.** Each mix is listed under **Mixes made here** (what from, at
+  which strengths, its rank and size, when, and its picture), carries what it
+  was made from in its own file, and gets a description in Forge's user
+  metadata, with both LoRAs' activation texts.
+- **A placeholder picture** — the two LoRAs as two discs, each as large as its
+  strength, under the new name — until you set one with **Replace preview** in
+  its card's dialog, which writes over it; one of yours put beside it any other
+  way replaces it too.
 
 ### Folders per UI Preset
 
@@ -8317,8 +8366,9 @@ scanned last** (on), **Fetch the model description** (on), **On a refresh, fill
 in text details missing from LoRAs already in the library** (on), **On a
 refresh, look up LoRAs Civitai had nothing for last time** (off), **Minimum
 delay between Civitai requests** (0.15 s), **Civitai request timeout** (30 s),
-**Gallery images inspected per version** (0 = all), **Only accept these base
-models**, **Require an explicit base-model label** (off).
+**Gallery images inspected per version** (0 = all), **Download each LoRA's first
+gallery image after a fetch** (on), **Only accept these base models**,
+**Require an explicit base-model label** (off).
 
 **Model Chain: Extra networks** — **Filter the extra-network browsers by the
 folders assigned to the active UI Preset** (on), **Also hide the folder buttons
@@ -8338,6 +8388,7 @@ when the UI Preset changes** (on).
     cache/thumbs/          the cards' thumbnails
     preset_folders.json    folder assignments per UI Preset
     last_used.json         the key and folder of the last fetch, owner-only
+    mixes.json             the mixes made on the Mix page
 ```
 
 ## LoRA Viewer
