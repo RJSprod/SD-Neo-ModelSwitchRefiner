@@ -1397,6 +1397,35 @@ class TestTheBarInFocusMode:
         assert quick and quick["display"] != "none" and quick["rect"]["top"] == 44 and quick["onTop"], quick
         assert networks and networks["rect"]["top"] == 44 and networks["onTop"], networks
 
+    def test_opened_from_the_peeking_bar_the_quick_settings_hang_under_it(self, browser):
+        """With the bar hidden, the quick settings opened from it while it
+        peeks hold the peek, and hang from its bottom edge as they do while it
+        is shown: they hung from the workspace's top, the window's while the
+        bar peeks, and their first settings were under the bar for as long as
+        the drawer was open."""
+        first = """() => { const box = document.querySelector('#mc-theme-quick #quicksettings > *');
+            const r = box.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 10));
+            return {top: r.top, onTop: box.contains(hit), held: forgeAssistant.shell.peekHeld()}; }"""
+        page = focus_page(browser)
+        try:
+            page.evaluate("forgeAssistant.shell.setFocusBar(false)")
+            enter_focus(page)
+            page.evaluate("forgeAssistant.shell.peekBar()")
+            settle(page, 4)
+            page.click(".mc-theme-quick-toggle")
+            settle(page, 6)
+            found = page.evaluate(FOCUS_BAR)
+            setting = page.evaluate(first)
+        finally:
+            page.close()
+
+        assert found["mode"] == "peek" and found["bar"]["bottom"] == 44, found
+        quick = found["quick"]
+        assert quick and quick["display"] != "none" and quick["rect"]["top"] == 44 and quick["onTop"], quick
+        assert setting["top"] > 44 and setting["onTop"] is True, setting
+        assert setting["held"] is True, "the open drawer holds the peek"
+
     def test_hidden_the_bar_and_its_drawers_are_gone_and_the_workspace_is_the_window(self, browser):
         page = focus_page(browser)
         page.click(".mc-theme-quick-toggle")

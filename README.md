@@ -4596,9 +4596,10 @@ comes, stays for as long as you hold on, and goes four seconds after you let
 go. A drag is no press, so the panel neither opens nor closes for it. A drawer
 you open from the bar while it is there for its moment -- the extra networks,
 the quick settings -- keeps the bar, and itself, on screen until you close it,
-so you can search, scroll and look into cards as long as you like. The extra
-networks hang from the bar's bottom then too, their title and close under it
-rather than beneath it, and in either of their layouts they are the drawer in
+so you can search, scroll and look into cards as long as you like. Both
+drawers hang from the bar's bottom then too -- the extra networks' title and
+close, the quick settings' first settings under the bar rather than beneath
+it -- and in either of their layouts the extra networks are the drawer in
 focus mode, their cards scrolling under their head. Forge's own
 pop-ups work in focus mode as on the page: a card's details and metadata
 editor, LoRA Details' dialog, the picture viewer and Generate's right-click

@@ -1223,12 +1223,16 @@
 
 /* In the Forge Assistant's focus mode the drawer goes with the bar its button
    is on: the assistant leaves it in the layout (the script marks it
-   `forge-assistant-focus-keep`), it hangs from the bar's bottom while the bar
-   is shown -- from the window's top while the bar peeks over the workspace --
-   a step above the workspace and under the bar, and with the bar hidden it is
-   not drawn, as focus mode drew none of the page's chrome before. */
+   `forge-assistant-focus-keep`), it hangs from the bar's bottom as on the
+   page -- the header's height, which is the kept bar's bottom whether the
+   bar is shown above the workspace or peeks over it, and nothing beside a
+   rail -- a step above the workspace and under the bar, and with the bar
+   hidden it is not drawn, as focus mode drew none of the page's chrome
+   before. It hung from the workspace's top until 2026-11-14, which is the
+   bar's bottom only while the bar is shown: opened from a peeking bar, its
+   first settings were under the bar for as long as it held the peek, as the
+   extra networks drawer's title and close were (docs/22 §3.56). */
 :root[data-mc-theme="on"] body.forge-assistant-focused .mc-theme-drawer {
-    top: var(--forge-assistant-focus-top, 0px);
     z-index: calc(var(--forge-assistant-workspace-layer, 1100) + 1);
 }
 

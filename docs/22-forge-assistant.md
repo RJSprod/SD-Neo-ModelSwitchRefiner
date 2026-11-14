@@ -4884,7 +4884,7 @@ refusal said, how each word reads as plain text, the vector's select, Apply with
 its strength and with no model, the store's two envelopes. Three older menu tests
 gained the entry.
 
-## 3.56 The extra networks in focus mode, again: the column and the peek (2026-11-14)
+## 3.56 The theme's drawers in focus mode, again: the column and the peek (2026-11-14)
 
 > "I need a fix for focus mode. The extra networks still don't work correctly
 > in focus mode. The panel won't scroll, and seems to be broken when I open it
@@ -4916,10 +4916,16 @@ the extra networks drawer):
   drawer's own rule on the page), the kept bar's bottom whether it is shown or
   peeking, and nothing beside a rail.
 
-Focus mode's rules for the drawer are now only the hidden bar's (`display:
+Focus mode's rules for the extra networks drawer are now only the hidden bar's (`display:
 none`), so a phone's drawer in focus mode is the window's width as on the page,
 where focus mode's undoing had held it at the setting's width; and the rail rule's
 two focus-mode selectors went with the `right: 0` they outranked.
+
+**The quick settings drawer, the same** (asked for once this was found: "yes,
+fix the quick settings drawer too"). Its focus-mode rule hung it from the
+workspace's top too, under the peeking bar, its first settings beneath the bar for
+as long as it held the peek. Its rule keeps only its layer now (a step above the
+workspace, under the bar), and it hangs from the header's height as on the page.
 
 **Verified.** `tests/test_theme_layout.py` (Chromium, `TestExtraNetworksInFocusMode`):
 in both layouts, with the bar shown and peeking, the head hangs from the bar's
@@ -4927,9 +4933,12 @@ bottom at the window's right edge with its close on top, the page runs under it 
 the window's bottom as wide as the head, holds more than it shows, and a wheel over
 it scrolls it and not the workspace; a column open on the page is the drawer when
 focus comes on and a column again, with nothing of focus mode's left on it, when
-it goes; on a phone the drawer is the window's width in focus mode as on the page.
-Six mutations each fail a test (the old stylesheet whole; each of the column's three
-rules applied in focus mode again; the drawer hung from the workspace's top; the
-setting's width kept in focus mode). The same probe in Zen, driven by Selenium, read
+it goes; on a phone the drawer is the window's width in focus mode as on the page;
+and `TestTheBarInFocusMode` has the quick settings opened from the peeking bar hang
+from its bottom with their first setting on top, holding the peek. Seven mutations
+each fail a test (the old stylesheet whole; each of the column's three rules
+applied in focus mode again; the extra networks hung from the workspace's top; the
+setting's width kept in focus mode; the quick settings hung from the workspace's
+top). The same probe in Zen, driven by Selenium, read
 the old stylesheet's column page at 4,704 px from the window's top and the new one's
 at 624 px under its head, scrolling. Not run on the user's machine.
