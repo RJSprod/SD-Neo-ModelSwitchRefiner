@@ -2600,6 +2600,20 @@ def publish_plan(*, stage_1_gb=14.0, stage_2_gb=0.0, total_gb=24.0, monkeypatch=
     return mc_plan.publish(mc_plan.Plan(tuple(phases), 1024, 1024))
 
 
+@pytest.fixture
+def generating(monkeypatch):
+    """A generation is running, which is when its published plan is in force.
+
+    A plan no longer outlives its generation (:func:`mc_plan.in_force`), so a
+    test about what a plan does to a placement is about a placement made
+    *during* one -- the Creative Writer before the checkpoint loads, a phase
+    transition, a batch planned for while a server holds VRAM -- and says so
+    with this. What happens between generations has classes of its own.
+    """
+    monkeypatch.setattr(mc_plan, "generating", lambda: True)
+
+
+@pytest.mark.usefixtures("generating")
 class TestThePlanCapsWhatAPlacementMaySpend:
     def test_with_no_plan_the_answer_is_what_is_free(self, placed, monkeypatch):
         """Every path had this behaviour before plans existed, and LLM Studio
@@ -2707,6 +2721,7 @@ def placed_under_the_current_plan(server):
     mc_plan.note_placement(plan)
 
 
+@pytest.mark.usefixtures("generating")
 class TestAPlacementIsReconsideredOnlyAtPlanBoundaries:
     def test_a_phase_transition_inside_one_generation_is_not_one(
             self, placed, tmp_path, monkeypatch):
@@ -2928,6 +2943,7 @@ class TestABoundaryStillWinsInsideAHostJob:
         assert not server._outgrown(configuration, 0)
 
 
+@pytest.mark.usefixtures("generating")
 class TestAServerGivesBackWhatThePlanNoLongerAllows:
     """The one direction ``_worth_restarting`` will never ask for.
 

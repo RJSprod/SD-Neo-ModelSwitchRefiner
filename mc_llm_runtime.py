@@ -1308,9 +1308,16 @@ def _spendable(already_ours: int = 0, card: int | None = None, *,
     A learned cap from a previous reserve miss applies on top, and only ever
     downwards (rule 16: no silent promotion back to a placement that failed).
 
-    With no plan published -- LLM Studio writing a prompt with no generation
-    behind it -- this is exactly :func:`_free_vram`, which is the behaviour
-    every path had before plans existed.
+    "In force" means while a generation is running (:func:`mc_plan.in_force`).
+    With no generation running -- LLM Studio writing a reply, the Load button,
+    a switch of the language model to this card -- this is exactly
+    :func:`_free_vram`, which is the behaviour every path had before plans
+    existed. A plan used to cap those too, for as long as the WebUI ran after
+    its generation: a user's 3090 with 22.5 GB free gave a 10 GB model no
+    layers at all, because the last generation's plan still protected 20.9 GB
+    of it. The learned cap goes with the plan, being a ceiling on the
+    language model *beside* it; the next generation's start takes back what
+    its plan needs (:func:`mc_plan.image_claim_bytes`).
     """
     free = _wangp_ceiling(_free_vram(already_ours, card), card, configuration)
     if not image_budget:
@@ -1320,33 +1327,35 @@ def _spendable(already_ours: int = 0, card: int | None = None, *,
         # -- capping by it here would make the setting unable to do the one
         # thing it says it does. The learned cap below is not lifted with it:
         # that one records an allocation the driver actually refused, and no
-        # amount of permission makes a refused allocation succeed.
+        # amount of permission makes a refused allocation succeed -- beside
+        # the generation it was refused beside, which is when it applies.
         try:
             import mc_plan
 
             learned = (mc_plan.learned_cap_bytes()
-                       if shares_the_image_card(card, configuration) else 0)
+                       if shares_the_image_card(card, configuration)
+                       and mc_plan.in_force() is not None else 0)
         except Exception:
             return free
         return max(min(free, learned) if learned > 0 else free, 0)
     try:
         import mc_plan
 
-        # Only an *active plan* caps anything. With none published there is no
-        # image workload to protect, and the budget arithmetic would then return
-        # the whole card -- measured a second way, from a second source, and
-        # therefore very slightly different from the reading above. Capping one
-        # measurement of the card by another measurement of the same card is not
-        # a policy, it is a rounding error with the power to move experts into
-        # system RAM.
+        # Only a plan *in force* caps anything. With none published, or with
+        # the last one's generation over, there is no image workload to
+        # protect, and the budget arithmetic would then return the whole card
+        # -- measured a second way, from a second source, and therefore very
+        # slightly different from the reading above. Capping one measurement
+        # of the card by another measurement of the same card is not a policy,
+        # it is a rounding error with the power to move experts into system RAM.
         # The plan protects one card. A placement on another one is outside
         # what it is protecting, so its budget is not this placement's ceiling
         # -- capping here is what made a role on an idle second card negotiate
         # itself down to the leftovers of the card it was never going to touch.
-        here = shares_the_image_card(card, configuration)
-        budget = (mc_plan.persistent_llm_budget(already_ours)
-                  if mc_plan.current() is not None and here else -1)
-        learned = mc_plan.learned_cap_bytes() if here else 0
+        protecting = (shares_the_image_card(card, configuration)
+                      and mc_plan.in_force() is not None)
+        budget = mc_plan.persistent_llm_budget(already_ours) if protecting else -1
+        learned = mc_plan.learned_cap_bytes() if protecting else 0
     except Exception:
         logger.debug("Model Chain: could not read the active plan's budget", exc_info=True)
         return free
@@ -3975,12 +3984,95 @@ def _warn_about_an_idle_card(configuration: Config, layers: str) -> None:
         return
     if normalise_mode(configuration.mode) in (MIXED_CONSERVATIVE_MODE, CPU_MODE):
         return
+    held = _held_back_by_a_generation(configuration)
+    if held is not None:
+        protected, left = held
+        logger.info("Model Chain: %s will do no work in this placement — the image "
+                    "generation running on it keeps %.1f GB for its own passes and leaves "
+                    "a language model %.1f GB, too little for any of this model, so the "
+                    "processor writes the whole prompt. Once the generation is over, the "
+                    "next request is placed in whatever the card has free.",
+                    _device_label(configuration), protected / _GB, left / _GB)
+        return
     logger.info("Model Chain: %s will do no work in this placement — nothing was free "
                 "to offload into, so the processor writes the whole prompt. Free VRAM "
                 "before pressing Generate, choose GPU placement in LLM Studio → Setup, "
                 "or pick a backbone that is faster in system RAM (a mixture-of-experts "
                 "one is several times faster there than a dense one of the same size).",
-                configuration.device_name or configuration.device)
+                _device_label(configuration))
+
+
+def _held_back_by_a_generation(configuration: Config) -> tuple[int, int] | None:
+    """``(protected, left)`` when a running generation's plan kept the model off its card.
+
+    ``None`` when it was the card -- nothing free -- or when no generation is
+    running at all. The idle-card line used to say "nothing was free to
+    offload into" whatever the reason, and from a user's log it said it about
+    a 3090 with 23,336 MiB free, beside advice to free VRAM that was already
+    free: what had given the language model nothing was a plan protecting the
+    card for an image generation, which is a different fact with a different
+    remedy. Now a plan is only in force while its generation runs
+    (:func:`mc_plan.in_force`), and that is the one case this names.
+    """
+    try:
+        import mc_plan
+
+        if mc_plan.in_force() is None:
+            return None
+        card = card_of(configuration)
+        if not shares_the_image_card(card, configuration):
+            return None
+        free = _wangp_ceiling(_free_vram(0, card), card, configuration)
+        left = _spendable(0, card, configuration=configuration)
+        if left >= free:
+            return None
+        return mc_plan.image_protected_bytes(), max(left, 0)
+    except Exception:
+        logger.debug("Model Chain: could not tell what kept the model off the card",
+                     exc_info=True)
+        return None
+
+
+def _between_generations(configuration: Config, placement: mc_llm_context.Placement,
+                         gguf, vision: bool = False) -> str:
+    """What a start on Forge's card between generations will give back, or "".
+
+    Between generations a language model on the image card is sized against
+    what is free (:func:`mc_plan.in_force`), and when it holds more than the
+    last generation's plan leaves one, the next generation's start stops it to
+    take that room back (:func:`mc_plan.image_claim_bytes`). That is the user's
+    rule -- free VRAM is the language model's until an image generation needs
+    it -- and a stop a person can read about before it happens is a stop they
+    are not left guessing at afterwards. Said only when it is going to be
+    true: a server that fits beside the plan is left where it is, and is not
+    worth a line.
+    """
+    try:
+        if not configuration.uses_cuda_compute or not placement.on_gpu:
+            return ""
+        if getattr(placement, "uma", False) or placement.gpu_layers == mc_llm_context.NO_LAYERS:
+            return ""
+        import mc_plan
+
+        if mc_plan.current() is None or mc_plan.in_force() is not None:
+            return ""
+        if not shares_the_image_card(card_of(configuration), configuration):
+            return ""
+        allowance = mc_plan.generation_llm_allowance(0)
+        if allowance < 0:
+            return ""
+        holds = (mc_llm_context.estimate(configuration.model, placement, gguf).total_bytes
+                 + projector_bytes(configuration, vision))
+    except Exception:
+        logger.debug("Model Chain: could not compare the placement with the last plan",
+                     exc_info=True)
+        return ""
+    if holds <= allowance:
+        return ""
+    return (f"no image generation is running, so llama-server takes what is free on "
+            f"{_device_label(configuration)} — about {holds / _GB:.1f} GB, where the last "
+            f"generation's plan leaves a language model {allowance / _GB:.1f} GB; the next "
+            f"image generation on this card stops it to take that room back")
 
 
 def _layers_argument(placement: mc_llm_context.Placement,
@@ -5230,6 +5322,10 @@ class Runtime:
             "" if plan is None or plan.accelerator == mc_llm_accel.ACCEL_NONE
             else f", {mc_llm_accel.short_label(plan.accelerator)}",
         )
+        between = _between_generations(configuration, placement, described,
+                                        vision=projector is not None)
+        if between:
+            logger.info("Model Chain: %s%s", self._said_for(), between)
         if configuration.uses_sycl_compute and _runtime_enumerates_a_device(executable) is False:
             # Never a silent start on the processor (design intent section
             # 8.4). The launcher drops a device selection a build cannot
@@ -5447,11 +5543,14 @@ class Runtime:
         # the room, and the first LLM call of the next generation is the one
         # that should be placed in it -- but it runs inside a host job, so a
         # host-busy check reached first would decline for the whole generation.
+        # "When there is one" is while its generation runs (mc_plan.in_force):
+        # between generations a server is reconsidered against what is free,
+        # so a card emptied by hand is a card the next request grows into.
         overspending = False
         try:
             import mc_plan
 
-            if mc_plan.current() is not None and self._plan_applies(configuration):
+            if mc_plan.in_force() is not None and self._plan_applies(configuration):
                 overspending = self._overspending(ours)
                 if not self._boundary_moved() and not overspending:
                     return False
@@ -5567,13 +5666,15 @@ class Runtime:
         a server placed with no plan in force is not re-placed merely because
         one has since appeared -- read from this runtime's own baseline, so
         two servers cannot answer each other's question (section 8.3, T13).
+        Between generations no plan is in force and there is no boundary to
+        have moved (:func:`mc_plan.in_force`).
         """
         if self._placed_for is None:
             return False
         try:
             import mc_plan
 
-            plan = mc_plan.current()
+            plan = mc_plan.in_force()
         except Exception:
             logger.debug("Model Chain: could not read the active plan", exc_info=True)
             return False
@@ -5587,12 +5688,14 @@ class Runtime:
         Only for a runtime the plan applies to. A different-card server that
         recorded boundaries would accumulate exactly the state section 8.3 says
         it must not: a baseline that later "moves", forcing a re-negotiation
-        and a GGUF read for a plan about a card it is not on (T16).
+        and a GGUF read for a plan about a card it is not on (T16). A placement
+        made between generations answers no plan either: it was sized against
+        what was free (:func:`mc_plan.in_force`).
         """
         try:
             import mc_plan
 
-            plan = mc_plan.current() if self._plan_applies() else None
+            plan = mc_plan.in_force() if self._plan_applies() else None
             self._placed_for = plan.identity() if plan is not None else None
             if plan is not None:
                 # Kept in step for the panel and for anything still reading the
@@ -5628,17 +5731,17 @@ class Runtime:
     def _allowance(self, ours: int) -> int:
         """What the active plan leaves *this* server, or -1 when it says nothing.
 
-        -1 is "not applicable", and it now covers two cases rather than one:
-        no plan is published, or there is one and it does not describe this
-        runtime's card (section 8.2). Both mean the same thing downstream --
-        there is no plan-derived ceiling here -- which is why one value carries
-        them: the alternative would be a second sentinel that every caller had
-        to treat identically.
+        -1 is "not applicable", and it covers three cases: no plan is in force
+        (none published, or its generation is over), or there is one and it
+        does not describe this runtime's card (section 8.2). All mean the same
+        thing downstream -- there is no plan-derived ceiling here -- which is
+        why one value carries them: the alternative would be a second sentinel
+        that every caller had to treat identically.
         """
         try:
             import mc_plan
 
-            if mc_plan.current() is None or not self._plan_applies():
+            if mc_plan.in_force() is None or not self._plan_applies():
                 return -1
             return mc_plan.persistent_llm_budget(ours)
         except Exception:
@@ -5871,7 +5974,16 @@ class Runtime:
                         "llama-server.log in the logs folder of the LLM data directory")
             return
         logger.info("Model Chain: llama.cpp reports %s", offload.describe())
-        if (offload.spilled and negotiated.placement.on_gpu
+        # Only a placement that asked for every weight on the card can be
+        # short-changed by it. One that left layers or experts in system RAM on
+        # purpose has already said so, and blaming the card for it is how a
+        # user's log came to tell them to look in nvidia-smi for whatever was
+        # holding a 3090 that had 23 GB free: this extension had asked for no
+        # layers, and llama.cpp had placed exactly that. A placement given less
+        # than it asked for is _report_residency's to say.
+        asked_for_everything = (negotiated.placement.gpu_layers == mc_llm_context.ALL_LAYERS
+                                and not negotiated.placement.cpu_experts)
+        if (offload.spilled and asked_for_everything and negotiated.placement.on_gpu
                 and not getattr(negotiated.placement, "uma", False)):
             logger.warning(
                 "Model Chain: %.1f GB of the weights (%.0f%%) are in system RAM, not on the "

@@ -155,12 +155,36 @@ class TestTheLlmHalf:
 
         assert "| Matches the active plan | yes |" in panel.llm_view()
 
-    def test_a_placement_made_for_a_different_plan_says_so(self, budget, server):
+    def test_a_placement_made_for_a_different_plan_says_so(self, budget, server,
+                                                          monkeypatch):
+        """While a generation runs: that is when a plan is in force."""
+        monkeypatch.setattr(mc_plan, "generating", lambda: True)
         chain()
         mc_plan.note_placement(mc_plan.current())
         chain(stage_2=False)
 
         assert "not yet" in panel.llm_view()
+
+    def test_between_generations_no_plan_is_waiting_to_re_place_it(self, budget, server,
+                                                                   monkeypatch):
+        """The same server, the same two plans, and no generation running.
+
+        The next request places it in what is free, not in what the plan
+        leaves, so "not yet -- the next request re-places it" would be telling
+        the user about a re-placement that is not coming.
+        """
+        monkeypatch.setattr(mc_plan, "generating", lambda: False)
+        chain()
+        mc_plan.note_placement(mc_plan.current())
+        chain(stage_2=False)
+
+        assert "| Matches the active plan | yes |" in panel.llm_view()
+
+    def test_the_protected_budget_says_it_is_kept_clear_while_a_generation_runs(
+            self, budget, server):
+        chain()
+
+        assert "kept clear while a generation runs" in panel.plan_view()
 
     def test_a_custom_cap_is_shown_beside_the_allowance_not_instead_of_it(
             self, budget, server, host):

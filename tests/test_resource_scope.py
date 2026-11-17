@@ -543,6 +543,9 @@ class TestThePlanIsAboutOneCard:
         import mc_plan
 
         monkeypatch.setattr(mc_plan, "current", lambda: _Plan(("stage-1",)))
+        # A generation running, which is when a plan is in force at all
+        # (mc_plan.in_force): every case here is about one.
+        monkeypatch.setattr(mc_plan, "generating", lambda: True)
         monkeypatch.setattr(mc_plan, "persistent_llm_budget", lambda ours=0: 4 * _GB)
         yield mc_plan
 

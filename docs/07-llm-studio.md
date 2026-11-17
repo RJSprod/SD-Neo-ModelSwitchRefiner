@@ -2824,6 +2824,11 @@ entire content of what the user asked for. The *learned* cap is not lifted with
 it: that one records an allocation a driver actually refused, and no amount of
 permission makes a refused allocation succeed.
 
+(Found on 17 November 2026, §52: no caller passes `image_budget=False`, so the
+reservation still caps the fit under LLM priority while a generation runs.
+Between generations neither the reservation nor the learned cap applies to any
+placement.)
+
 ### 28.5 A hybrid model keeps memory in two places
 
 Qwen 3.8 interleaves Gated DeltaNet blocks with periodic full attention.
@@ -5589,3 +5594,94 @@ three checks in `tests/live/llm_studio_conversation_live.py` on real Gradio
 tests were tightened (the file read raw, the cache identity against the formula
 before the change, a switch that is not true or false). Not run against a real
 llama-server, with a real vector, or on the user's machine.
+
+## 52. Between generations, free VRAM is the language model's (17 November 2026)
+
+> "I switched the LLM to my 3090, which should have plenty of free vram, but
+> the LLM was still not put on the card completely!"
+
+> "When i decide to switch the LLM GPU or to CPU, i would like our extension to
+> recalculate the remain free space at that point. I had free vram at the point
+> of switching! There should be no blocks if the vram is free. If i try to run
+> another image generation, thats when the LLM could get kicked out of my 3090,
+> but not while there is free space!"
+
+**What the logs showed.** The model (a 10.0 GiB Q2_K_P of a 26B
+mixture-of-experts, vision on) was switched to the RTX 3090 that Forge
+generates on, with the image model unloaded by hand: llama.cpp saw 23,336 MiB
+free, and this extension started it with no layers on the card. Not a card
+mix-up -- both sides named the 3090 by UUID, and the card-turn system had
+stopped a VibeVoice worker there earlier "because an image generation needs the
+card". The cause was the plan (`mc_plan`): published by the last generation,
+nearly three hours before, and never taken down -- `mc_plan.clear()` was called
+only by tests -- so `_spendable` went on capping every placement on that card
+at the plan's remainder, 22.5 GB obtainable less 20.9 GB protected for a batch
+of four. 1.6 GB is less than the 1.0 GB margin and the 1.26 GB projector
+together, so every rung of the ladder failed and the whole model went to system
+RAM. Reproduced with `negotiate` itself and the model's measured sizes:
+0 layers with the plan, every layer and six caches (15.5 GiB, where llama.cpp
+projected 15,910 MiB for the same placement on the user's Arc) without it. The
+code's own docstrings already said a question asked outside a generation had
+no plan to protect (`clear`, `image_protected_bytes`, `_spendable`); nothing
+made that so.
+
+**Built.**
+
+- **A plan is in force only while a generation runs** (`mc_plan.in_force`,
+  `mc_plan.generating`: Forge's own job state through `mc_broker.host_busy`,
+  the reading every LLM turn on the image card already waits on; an unreadable
+  state counts as a generation). Every placement decision asks it instead of
+  `current()`: `_spendable` (the plan's budget and the learned cap, LLM
+  priority's branch too), `Runtime._outgrown`, `_boundary_moved`,
+  `_note_placement` and `_allowance`. Between generations a placement on the
+  image card is sized against what is free; the plan itself is kept, for the
+  panel and the next comparison. Within a generation nothing changed.
+- **The next generation takes its room back as it starts.** The generation
+  start's `request_vram(FAMILY_IMAGE, ...)`, which asked for zero in Hybrid
+  mode, asks for `mc_plan.image_claim_bytes` whenever a language model holds
+  VRAM on the image card (`ScriptModelChain._room_to_claim`): the obtainable
+  card less what the image side holds less what the plan leaves a language
+  model (`generation_llm_allowance`: the persistent budget under the learned
+  cap). The broker frees the deficit, a warm speech guest first: a server in
+  the way is stopped (`llama-server stopped — the image generation starting on
+  this card`) after the wait for an in-flight reply, one that fits is left
+  where it is, and with no language model on the card the call is the zero it
+  always was, Exclusive mode's sweep included. Without this, a server placed
+  in free VRAM could have stood in a batch's activations, because Stage 1's
+  own reclaim sizes the headroom for one image.
+- **The log says what decided.** A start between generations that holds more
+  than the last plan leaves a language model says the next generation will
+  stop it (`_between_generations`). The idle-card line names a running
+  generation when its plan was the limit (`_held_back_by_a_generation`) and the
+  card without the free VRAM recorded at setup (`_device_label`), where it
+  printed "nothing was free to offload into" beside 23,336 MiB free. The
+  warning that "the card has less room than this extension can see" fires only
+  for a placement that asked for every weight on the card, as `_report_offload`
+  always said it was for.
+- **The panel**: *Image-protected budget* is kept clear while a generation
+  runs, and *Matches the active plan* answers yes between generations.
+
+A switch to the processor needed nothing: system RAM is admitted against what
+is free at the moment (`mc_broker.admit_host_ram`), and never read the plan.
+The trade-off, said in the README: a card used by a language model between
+generations costs a server start after each generation that needs the room,
+softened by the saved prompt caches (`mc_llm_slot_cache`; the README's *A
+conversation's cache across a restart*).
+
+**Found, not built: LLM priority.** §28.4 says `_spendable` is asked with
+`image_budget=False` under LLM priority; no caller passes it, so LLM priority
+releases image residency and the negotiation after it is still capped by the
+plan while a generation runs. Left for the user to decide.
+
+**Tests.** `tests/test_llm_between_generations.py` (when a plan is in force;
+the user's card through `negotiate` with the model's measured sizes, between
+and during generations; the learned cap with the plan; a running server --
+not pushed down, pushed down during, grown after, its baseline; the claim's
+arithmetic; the generation start through the real hook and broker, stopping a
+15.5 GB server and leaving a 1 GB one; the start line, the idle-card line and
+the spill warning), the panel's two rows in `tests/test_plan_panel.py`, and the
+plan tests in `tests/test_llm_runtime.py`, `tests/test_resource_scope.py`,
+`tests/test_llm_roles.py` and `tests/test_plan_panel.py` translated to say a
+generation is running (their intent). Twenty-one mutations each fail a test;
+one survived a first pass because its guard raised inside a hook that swallows
+what it raises, and now records instead. Not run on the user's machine.

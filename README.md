@@ -913,7 +913,7 @@ Handoff                  17.0 GB    Stage 1 encoders kept; sets the protected pe
 Stage 2                  15.0 GB    klein9b
 Stage 1 warm-up          10.0 GB    restored for the next press
 Image working peak       17.0 GB    the largest phase, not the sum of them
-Image-protected budget   17.0 GB    kept clear whatever else asks for it
+Image-protected budget   17.0 GB    kept clear while a generation runs; between them a language model may use what is free
 ```
 
 Two rules do the work.
@@ -936,6 +936,33 @@ it means stopping the server the next request was going to reuse. The placement
 is reconsidered only when the plan itself changes — a different checkpoint, a
 different resolution class, Stage 2 switched on or off — or when the estimate is
 demonstrably wrong.
+
+**Between generations, free VRAM is the language model's.** A plan protects the
+card only while its generation is running. Once it is over, a language model
+placed on Forge's card — a reply in LLM Studio, the Load button, switching the
+model to that card — is sized against what is actually free there, so a card
+you have emptied by unloading the image model takes the whole model. Before
+this, the last generation's plan went on protecting the card for as long as the
+WebUI ran: a 3090 with 23 GB free and the image model unloaded gave a 10 GB
+model no layers at all, because a plan published hours earlier still kept
+20.9 GB of it for a batch of four nobody was generating.
+
+The next generation on that card takes back what its plan needs as it starts,
+before anything loads: a language model holding more than the plan leaves it is
+stopped (`llama-server stopped — the image generation starting on this card`),
+and one that fits beside the plan is left exactly where it is. Inside the
+generation everything above still holds, and afterwards the next request is
+placed in whatever is free then — the model grows back onto a card the image
+model has left. A start that the next generation is going to stop says so on
+its own line: *no image generation is running, so llama-server takes what is
+free on NVIDIA GeForce RTX 3090 — about 16.8 GB, where the last generation's
+plan leaves a language model 1.6 GB; the next image generation on this card
+stops it to take that room back*. Using a card between generations this way
+costs a server start after each generation that needs the room; the saved
+prompt cache of a conversation is read back on the new server wherever
+llama.cpp can resume it (*A conversation's cache across a restart*). A model switched to the
+processor is admitted against the system RAM free at that moment, as it always
+was.
 
 Sizing a placement against instantaneous free VRAM instead is what the section
 replaced, and it is worth naming what that looked like. In one user's
@@ -970,9 +997,14 @@ prompt speed.
 
 | Setting | Effect |
 | --- | --- |
-| **Auto** (default) | size llama-server from what the plan leaves over |
+| **Auto** (default) | size llama-server from what the plan leaves over while a generation runs |
 | **Custom** | a lower ceiling than the calculated allowance |
-| **Off** | no persistent residency; the whole arena is the image plan's |
+| **Off** | no persistent residency: while a generation runs the whole arena is the image plan's, and a language model on the card is stopped as one starts |
+
+Each of them is about a generation that is running. Between generations a
+language model on the card uses what is free, whichever is chosen, and the next
+generation's start holds it to the figure above (*Between generations, free
+VRAM is the language model's*).
 
 A lower Custom cap means more image headroom, fewer GPU-resident expert layers,
 lower tokens per second, and a greater chance the server survives every phase
@@ -985,7 +1017,9 @@ warm state is released first, then llama-server is evicted if that is what it
 takes to finish the picture. That is recovery rather than scheduling, so it is
 recorded and shown in the same section, with the amount of the miss and a
 suggested safer cap — and the language model is not silently promoted back to
-the placement that failed.
+the placement that failed. The safer cap is a ceiling on the language model
+beside that plan, so it applies while a generation runs, and the next
+generation's start holds a server placed between generations to it.
 
 #### How this works on Forge Neo, and one honest limitation
 
@@ -5590,7 +5624,7 @@ starts:
 
 | Setting | Behaviour |
 | --- | --- |
-| **Keep the LLM loaded** (the default) | llama-server is left where it is. It is holding spare VRAM, so the generation is unaffected and the next prompt starts warm. |
+| **Keep the LLM loaded** (the default) | llama-server is left where it is when it fits beside the generation's plan, so the generation is unaffected and the next prompt starts warm. One placed between generations in room the plan needs is stopped as the generation starts. |
 | **Free the LLM for every image** | llama-server is stopped — and a warm VibeVoice unloaded — and the generation gets every last byte, at the cost of a model load per image. |
 
 Neither setting ever *starts* one. **llama-server comes up on the first request
@@ -5610,13 +5644,17 @@ The default's rule is stated as a sentence and implemented as one:
 > Never unload merely because another workload started. Demote only because the
 > incoming workload actually needs the memory.
 
-"Actually needs the memory" is decided in `make_vram_room`, which is where the
-cross-workload reclaim hook lives — so a generation only reaches it by asking
-that function for a budget. Stage 1 asks whenever a checkpoint was swapped in
-**or** whenever a language model is holding VRAM on the image card, the second
-being the case a plan with no Stage 2 would otherwise never produce. With no
-language model on the card the question is free and nothing is said, which is
-what keeps this off the console of anybody who does not run one.
+"Actually needs the memory" is decided twice. As a generation starts, its plan
+says what it needs on its card, and a language model holding part of that is
+stopped before anything loads (*Between generations, free VRAM is the language
+model's*); one that fits beside the plan is not touched. Then in
+`make_vram_room`, which is where the cross-workload reclaim hook lives — so a
+pass only reaches it by asking that function for a budget. Stage 1 asks whenever
+a checkpoint was swapped in **or** whenever a language model is holding VRAM on
+the image card, the second being the case a plan with no Stage 2 would otherwise
+never produce. With no language model on the card both questions are free and
+nothing is said, which is what keeps this off the console of anybody who does
+not run one.
 
 **A warm-up is not a generation, and never spends the LLM's VRAM.** Warming the
 image model between generations goes through the same `make_vram_room`, but asks

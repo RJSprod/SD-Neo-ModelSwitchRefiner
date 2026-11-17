@@ -1010,6 +1010,8 @@ class TestARoleOnAnotherCardIsNotTheImageCardsProblem:
                             lambda index=None: 30 * _GB)
         monkeypatch.setattr(mc_broker, "image_device_index", lambda: 0)
         monkeypatch.setattr(mc_plan, "current", lambda: object())
+        # While a generation runs, which is when a plan is in force at all.
+        monkeypatch.setattr(mc_plan, "generating", lambda: True)
         monkeypatch.setattr(mc_plan, "persistent_llm_budget", lambda ours=0: 3 * _GB)
         monkeypatch.setattr(mc_plan, "learned_cap_bytes", lambda: 0)
 

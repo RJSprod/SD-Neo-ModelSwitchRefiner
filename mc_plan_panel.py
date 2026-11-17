@@ -137,7 +137,8 @@ def plan_view(budget: mc_plan.Budget | None = None) -> str:
     lines.append(_row("Global safety headroom", gigabytes(budget.safety_bytes),
                       "already inside each phase peak above"))
     lines.append(_row("**Image-protected budget**", f"**{gigabytes(budget.protected_bytes)}**",
-                      "kept clear whatever else asks for it"))
+                      "kept clear while a generation runs; between them a language "
+                      "model may use what is free"))
     return "\n".join(lines)
 
 
@@ -281,10 +282,15 @@ def llm_view(budget: mc_plan.Budget | None = None) -> str:
 
 
 def _placement_matches_plan(running: bool) -> bool:
-    """Whether the running server was placed for the plan that is now in force."""
+    """Whether the running server was placed for the plan that is now in force.
+
+    Between generations no plan is in force (:func:`mc_plan.in_force`): the
+    server was sized against what was free, and nothing will re-place it for
+    the plan until the next generation starts.
+    """
     if not running:
         return False
-    if mc_plan.current() is None:
+    if mc_plan.in_force() is None:
         return True
     return mc_plan.placed_for() is not None and not mc_plan.boundary_moved()
 

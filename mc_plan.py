@@ -55,6 +55,18 @@ deliberately keeps Stage 1's VAE and text encoder resident while Stage 2 loads
 (``mc_memory._pinned_keep``). That overlap is real, so it is a phase of its
 own with its own peak, and it is frequently the largest one in the plan.
 
+A plan lasts as long as its generation
+--------------------------------------
+The protection is for the generation the plan was published for, and only
+while that generation is running (:func:`in_force`). Between generations
+nothing is being made on the card, so a language model placed there -- a
+reply in LLM Studio, the Load button, a switch to this card -- is sized
+against what is free. The next generation's start takes back what its plan
+needs (:func:`image_claim_bytes`), which stops a language model that is in the
+way and leaves one that fits beside the plan where it is. Within a generation
+nothing changes: every language-model phase is placed in what the plan leaves
+over and left there.
+
 What this module does not do
 ----------------------------
 It moves nothing and starts nothing. It answers "how much" and "which phase",
@@ -1127,6 +1139,116 @@ def _image_card_name() -> str:
 def current() -> Plan | None:
     with _lock:
         return _current
+
+
+def generating() -> bool:
+    """Whether the WebUI is running a job, which is the only time a plan is spent.
+
+    Forge's own state, read through :func:`mc_broker.host_busy` -- the reading
+    every language-model turn on the image card already waits on, so the two
+    cannot disagree about whether a generation is under way. A job is set
+    before the first ``before_process`` hook runs and cleared when the job
+    ends, so a plan published by that hook is in force for every phase of its
+    generation, the language-model phases included.
+
+    Answers *yes* when the question cannot be asked: treating an unknown state
+    as a generation keeps the plan's protection on, and the cost of being wrong
+    that way is a smaller language model rather than an image pass that runs
+    out of memory.
+    """
+    try:
+        import mc_broker
+
+        return bool(mc_broker.host_busy())
+    except Exception:
+        logger.debug("Model Chain: could not ask whether the WebUI is generating",
+                     exc_info=True)
+        return True
+
+
+def in_force() -> Plan | None:
+    """The published plan while a generation is running to need it; None between them.
+
+    What every *placement* decision asks, where :func:`current` is what the
+    panel and the log describe. A plan is one generation's -- published as it
+    starts, sized for its phases -- and nothing ever took it down again, so
+    the last generation's plan went on sizing every language model placed on
+    Forge's card for as long as the WebUI ran. From a user's log: an RTX 3090
+    with 23,336 MiB free, the image model unloaded by hand, and a 10 GB model
+    placed with no layers on the card at all, because a plan published nearly
+    three hours earlier still protected 20.9 GB of it for a batch of four
+    nobody was generating. The user's rule is the one this answers: free VRAM is the
+    language model's to use, and an image generation that needs it is when
+    the language model goes.
+
+    So between generations there is nothing to protect, which is what
+    :func:`clear` and :func:`image_protected_bytes` always said about a
+    question "asked outside a generation" -- only nothing ever made that the
+    case. The plan itself is kept: it is still the last generation's, the
+    panel still shows it, and the next generation's is compared with it.
+    When the next one starts, :func:`image_claim_bytes` takes back whatever
+    of its room a language model placed in the meantime is holding.
+    """
+    plan = current()
+    if plan is None:
+        return None
+    return plan if generating() else None
+
+
+def generation_llm_allowance(already_ours: int = 0) -> int:
+    """What a language model on the image card may hold while this plan's generation runs.
+
+    The persistent budget under any learned cap -- the same ceiling
+    :func:`mc_llm_runtime._spendable` sizes a placement against during a
+    generation -- in one place, so the claim a generation makes as it starts
+    and the line that warns a server it will be stopped cannot disagree about
+    it. -1 when it cannot be worked out.
+    """
+    allowance = persistent_llm_budget(already_ours)
+    if allowance < 0:
+        return -1
+    learned = learned_cap_bytes()
+    return min(allowance, learned) if learned > 0 else allowance
+
+
+def image_claim_bytes(llm_bytes: int = 0) -> int:
+    """VRAM the image side asks to have free on its card as a generation starts.
+
+    The other half of :func:`in_force`. Between generations a language model
+    on Forge's card is sized against what is free there, so when the next
+    generation starts it may be holding room this plan needs; this is that
+    room, as one figure the broker frees the deficit of -- a warm speech guest
+    first, then the language model (:func:`mc_broker._victim_order`). It is
+    the card the plan can obtain, less what the image side already holds on
+    it, less what the plan leaves a language model (the learned cap included):
+    so a server that fits beside the plan is left exactly where it is, and one
+    that does not is stopped before Stage 1 loads rather than found in the
+    way of a batch's activations halfway through the first step.
+
+    ``llm_bytes`` is what our language models hold on the image card now, which
+    :func:`usable_vram_bytes` counts as obtainable. Zero with no plan, with a
+    card that cannot be measured, or when the plan's allowance cannot be
+    worked out: asking for nothing moves nothing, which is what every
+    generation start did before this existed.
+    """
+    if current() is None:
+        return 0
+    ours = max(int(llm_bytes), 0)
+    total = usable_vram_bytes(ours)
+    if total <= 0:
+        return 0
+    allowance = generation_llm_allowance(ours)
+    if allowance < 0:
+        return 0
+    try:
+        import mc_broker
+
+        held = max(int(mc_broker.held_bytes(mc_broker.FAMILY_IMAGE, card=_image_card())), 0)
+    except Exception:
+        logger.debug("Model Chain: could not read the image family's residency",
+                     exc_info=True)
+        held = 0
+    return max(total - held - allowance, 0)
 
 
 def clear() -> None:

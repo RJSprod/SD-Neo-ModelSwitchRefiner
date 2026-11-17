@@ -578,7 +578,9 @@ shared.options_templates.update(
             ).info(
                 "Auto sizes llama-server from what the generation's largest phase leaves "
                 "over. Custom lowers that ceiling, trading tokens per second for image "
-                "headroom. Off keeps no persistent residency"
+                "headroom. Off keeps no persistent residency. All three hold while a "
+                "generation runs: between generations llama-server uses what is free, and "
+                "the next generation stops it if it needs the room"
             ),
             mc_plan.OPT_CAP_GB: shared.OptionInfo(
                 0.0,
@@ -2759,19 +2761,26 @@ class ScriptModelChain(scripts.Script):
                               exc_info=True)
 
         mc_broker.await_idle(domain=image_domain)
-        # Claim VRAM ownership for the image family, on the image card. The
-        # number is zero on purpose: in Hybrid mode a generation starting is
-        # not a reason to move anything, so this does nothing at all, and the
-        # real demotion happens later, from make_vram_room, only if the pass
-        # actually does not fit. In Exclusive mode it is the handover --
-        # ownership there is a promise rather than an optimisation, so the LLM
-        # leaves VRAM whether or not this generation would have needed the room
-        # (sections 8 and 10). Ownership of *this* card: "the image family owns
-        # the GPU" has never meant every GPU in the machine, and a sweep that
-        # crossed to a second one would stop a language model to free memory
-        # this generation cannot reach (section 9.2).
-        mc_broker.request_vram(mc_broker.FAMILY_IMAGE, 0,
-                               reason="an image generation started", margin=0,
+        # Claim this generation's room on the image card. In Exclusive mode it
+        # is the handover -- ownership there is a promise rather than an
+        # optimisation, so the LLM leaves VRAM whether or not this generation
+        # would have needed the room (sections 8 and 10). In Hybrid mode it is
+        # what the plan just published needs and nothing more. Between
+        # generations a language model on this card is sized against what is
+        # free (mc_plan.in_force), so it may be holding room this generation is
+        # about to spend, and this is when it gives it back: stopped if it is
+        # in the way, left exactly where it is if it fits beside the plan --
+        # the user's rule, that free VRAM is the language model's until an
+        # image generation needs it. With no language model on the card the
+        # number is zero and Hybrid mode moves nothing here, as it always did;
+        # make_vram_room still frees the rest if a pass does not fit. After the
+        # in-flight wait above, so a reply being written is never cut off.
+        # Ownership of *this* card: "the image family owns the GPU" has never
+        # meant every GPU in the machine, and a sweep that crossed to a second
+        # one would stop a language model to free memory this generation
+        # cannot reach (section 9.2).
+        mc_broker.request_vram(mc_broker.FAMILY_IMAGE, self._room_to_claim(),
+                               reason="the image generation starting on this card", margin=0,
                                card=image_card if image_card >= 0 else mc_broker.ANY_CARD)
 
         # Always reinstate a checkpoint we ourselves left swapped out, even when
@@ -2898,6 +2907,27 @@ class ScriptModelChain(scripts.Script):
             return
 
         logger.info("%s", message)
+
+    @staticmethod
+    def _room_to_claim() -> int:
+        """What this generation's plan needs back from a language model on its card.
+
+        Zero when no language model is on the image card, which is nearly every
+        generation of somebody who does not use that half of the extension, and
+        then the claim above is exactly the call it always was. Otherwise the
+        plan's room less what the image side already holds and less what the
+        plan leaves a language model (:func:`mc_plan.image_claim_bytes`), so the
+        broker stops a server only for the part of the plan it is standing in.
+        """
+        try:
+            held = int(mc_memory.llm_vram_on_the_image_card())
+            if held <= 0:
+                return 0
+            return int(mc_plan.image_claim_bytes(held))
+        except Exception:
+            errors.report("Model Chain: could not size this generation's room on the image "
+                          "card", exc_info=True)
+            return 0
 
     @staticmethod
     def _make_room_for_stage_1(p) -> int:
