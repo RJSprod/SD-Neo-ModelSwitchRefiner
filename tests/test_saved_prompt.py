@@ -3,11 +3,14 @@
 The user's report: an image made here, read back in PNG Info, has every LoRA at
 the front of its prompt, and they want them at the end (2026-11-03) -- when an
 image is recalled into the prompt box as well, on every model ("krea, moss,
-sdxl, etc"), and each tag on a line of its own (2026-11-23). The front is this
+sdxl, etc"), and each tag on a line of its own (2026-11-23); then PNG Info
+itself, which showed an older image's text as the file holds it ("I went
+straight to png info to load the settings of a previous image. The lora all
+showed up at the front of the prompt!", 2026-11-23). The front is this
 extension's doing -- every bare tag is lifted out of the Txt2Img prompt and put
 back in front of it before Forge sees it -- so the fix moves them in the saved
-text and the recalled text alone. Four things have to hold, and each class
-below is one of them:
+text and in the text read back, and never in what Forge generates from. What
+has to hold, a class or two each:
 
 * the move itself: the words, then each tag on its own line in the order they
   had, the words tidied as a paste of them would tidy them;
@@ -17,13 +20,20 @@ below is one of them:
 * the wiring: Forge's ``create_infotext`` is wrapped without being made to
   compute anything differently, and every generation's text is rewritten;
 * the recall: every recalled prompt comes back in the same shape, whatever
-  made the image.
+  made the image;
+* PNG Info: an image saved before the move is shown, and sent, as the same
+  image saved today, with only its prompt's lines moved; an image dropped on
+  the prompt box puts that text there; and the move runs after every other
+  extension's paste hook.
 """
 
 from __future__ import annotations
 
+import html
 import inspect
 import random
+import re
+import sys
 import types
 
 import pytest
@@ -419,3 +429,427 @@ class TestARecalledPromptEndsWithItsTags:
 
         assert mc_saved_prompt.on_infotext_pasted in \
             script_callbacks.registered["infotext_pasted"]
+
+
+# --------------------------------------------------------------------------- #
+# What PNG Info shows and sends, a dropped image, and the paste hooks' order
+# --------------------------------------------------------------------------- #
+
+SAVED_PROMPT = "<lora:a:1> <lora:b:0.5> a woman in the rain, soft light"
+MOVED_PROMPT = "a woman in the rain, soft light\n<lora:a:1>\n<lora:b:0.5>"
+PARAMETER_LINE = ("Steps: 20, Sampler: Euler, CFG scale: 7, Seed: 1, Size: 832x1216, "
+                  'Lora hashes: "a: 0123abcd, b: 4567ef01", Version: f2.0.1')
+SAVED = f"{SAVED_PROMPT}\nNegative prompt: <lora:n:1> blurry, low quality\n{PARAMETER_LINE}"
+MOVED = f"{MOVED_PROMPT}\nNegative prompt: <lora:n:1> blurry, low quality\n{PARAMETER_LINE}"
+ITEMS = {"extras": "Postprocess upscale by: 2"}
+
+FORGES_RE_PARAM = re.compile(r'\s*([\w\s\-\/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)')
+"""Forge Neo's ``re_param``, copied from ``modules/infotext_utils.py``."""
+
+
+def forges_plaintext_to_html(text, classname=None):
+    """Forge Neo's ``modules/ui_common.py``."""
+    content = "<br>\n".join(html.escape(x) for x in text.split("\n"))
+    return f"<p class='{classname}'>{content}</p>" if classname else f"<p>{content}</p>"
+
+
+def extras_module(saved, items=None, *, names_its_writer=True):
+    """Forge Neo's ``modules/extras.py`` as far as PNG Info reads an image: its
+    ``run_pnginfo`` line for line, over an image whose saved text is ``saved``
+    and whose other text chunks are ``items``. Forge's module imports the HTML
+    writer it uses (``plaintext_to_html``), so the module names it -- unless
+    ``names_its_writer`` is false, a Forge whose PNG Info writes its HTML some
+    way the module does not show."""
+    module = types.SimpleNamespace()
+    if names_its_writer:
+        module.plaintext_to_html = forges_plaintext_to_html
+
+    def read_info_from_image(image):
+        return saved, dict(items or {})
+
+    def run_pnginfo(image):
+        if image is None:
+            return "", "", ""
+
+        geninfo, found = read_info_from_image(image)
+        found = {**{"parameters": geninfo}, **found}
+
+        info = ""
+        for key, text in found.items():
+            info += f"""<div>
+            <p><b>{forges_plaintext_to_html(str(key))}</b></p>
+            <p>{forges_plaintext_to_html(str(text))}</p>
+        </div>""".strip() + "\n"
+
+        if len(info) == 0:
+            message = "Nothing found in the image."
+            info = f"<div><p>{message}<p></div>"
+
+        return "", geninfo, info
+
+    module.run_pnginfo = run_pnginfo
+    return module
+
+
+def forges_parse(text, strip_whitespaces=True):
+    """Forge Neo's ``parse_generation_parameters`` as far as it splits a saved
+    text: the prompt, the negative prompt and the parameters' line, under
+    either reading of its *strip whitespaces* setting."""
+    *lines, lastline = text.strip().split("\n")
+    if len(FORGES_RE_PARAM.findall(lastline)) < 3:
+        lines.append(lastline)
+        lastline = ""
+    prompts, negatives, negative = [], [], False
+    for line in lines:
+        if strip_whitespaces:
+            line = line.strip()
+            if line.startswith("Negative prompt:"):
+                line = line.replace("Negative prompt:", "").strip()
+                negative = True
+        elif line.lstrip().startswith("Negative prompt: "):
+            line = line.replace("Negative prompt: ", "")
+            negative = True
+        (negatives if negative else prompts).append(line)
+    return "\n".join(prompts), "\n".join(negatives), lastline
+
+
+def callbacks_module(*hooks):
+    """Forge Neo's ``script_callbacks`` as far as a paste runs its hooks: each
+    in turn, one that raises reported and the next one run."""
+    module = types.SimpleNamespace(hooks=list(hooks), reported=[])
+
+    def infotext_pasted_callback(infotext, params):
+        for hook in module.hooks:
+            try:
+                hook(infotext, params)
+            except Exception as error:
+                module.reported.append(error)
+
+    module.infotext_pasted_callback = infotext_pasted_callback
+    return module
+
+
+def forges_paste(callbacks, text):
+    """What Forge's paste does with a saved text before it fills a single field
+    (``infotext_utils.connect_paste``): the text parsed, then the hooks run
+    through the runner, which it reads off the module at the call."""
+    prompt, negative, _ = forges_parse(text)
+    params = {"Prompt": prompt, "Negative prompt": negative}
+    callbacks.infotext_pasted_callback(text, params)
+    return params
+
+
+def hosts(saved=SAVED, items=ITEMS, *hooks):
+    return {"extras": extras_module(saved, items),
+            "images": types.SimpleNamespace(image_data=lambda data: (saved, None)),
+            "script_callbacks": callbacks_module(mc_saved_prompt.on_infotext_pasted, *hooks)}
+
+
+def only(**named):
+    """``install_readers``' arguments with every host not named standing in empty."""
+    return {"extras": types.SimpleNamespace(), "images": types.SimpleNamespace(),
+            "script_callbacks": types.SimpleNamespace(), **named}
+
+
+@pytest.fixture
+def readers():
+    """Forge's three readers of an image's text, wrapped as ``on_before_ui``
+    wraps them, and put back afterwards."""
+    named = hosts()
+    assert mc_saved_prompt.install_readers(**named) == []
+    yield types.SimpleNamespace(**named)
+    mc_saved_prompt.uninstall_readers(**named)
+
+
+class TestWhatPNGInfoShows:
+    """The user's report once the saved and recalled text were moved: "I went
+    straight to png info to load the settings of a previous image. The lora all
+    showed up at the front of the prompt!" (2026-11-23). PNG Info shows the text
+    an image holds, and an image saved before the move holds its tags in front."""
+
+    def test_it_shows_the_prompt_with_its_tags_at_the_end_one_a_line(self, readers):
+        _, _, shown = readers.extras.run_pnginfo(object())
+        assert ("<p>a woman in the rain, soft light<br>\n&lt;lora:a:1&gt;<br>\n"
+                "&lt;lora:b:0.5&gt;<br>\nNegative prompt:") in shown
+        assert "&lt;lora:a:1&gt; &lt;lora:b:0.5&gt; a woman" not in shown
+
+    def test_it_shows_exactly_what_forge_shows_for_the_same_image_saved_today(self, readers):
+        """The whole answer is Forge's own for the moved text: the parameters'
+        paragraph, the image's other text, the layout and the hidden box."""
+        today = extras_module(MOVED, ITEMS)
+        assert readers.extras.run_pnginfo(object()) == today.run_pnginfo(object())
+
+    def test_its_send_to_buttons_read_the_moved_text(self, readers):
+        _, sent, _ = readers.extras.run_pnginfo(object())
+        assert sent == MOVED
+        for strip in (True, False):
+            assert forges_parse(sent, strip) == \
+                (MOVED_PROMPT, *forges_parse(SAVED, strip)[1:])
+        from modules import infotext_utils
+
+        assert infotext_utils.parse_generation_parameters(sent) == \
+            infotext_utils.parse_generation_parameters(SAVED)
+
+    def test_sent_from_png_info_the_box_gets_the_moved_prompt(self, readers):
+        _, sent, _ = readers.extras.run_pnginfo(object())
+        assert forges_paste(readers.script_callbacks, sent)["Prompt"] == MOVED_PROMPT
+
+    @pytest.mark.parametrize("saved", [
+        None,
+        "",
+        "a woman in the rain, soft light",
+        "Steps: 20, Sampler: Euler, CFG scale: 7",
+        "<lora:a:1> a woman [[keep]]\nSteps: 20, Sampler: Euler, CFG scale: 7",
+        "a woman -<lora:a:1>\nSteps: 20, Sampler: Euler, CFG scale: 7",
+        '{"sui_image_params": {"prompt": "<lora:a:1> a cat", "steps": 20}}',
+        f"{MOVED_PROMPT}\nSteps: 20, Sampler: Euler, CFG scale: 7",
+    ])
+    def test_an_image_with_nothing_to_move_is_shown_as_forge_shows_it(self, saved):
+        ours, forge = extras_module(saved, ITEMS), extras_module(saved, ITEMS)
+        mc_saved_prompt.install_readers(**only(extras=ours))
+        assert ours.run_pnginfo(object()) == forge.run_pnginfo(object())
+        assert ours.run_pnginfo(None) == ("", "", "")
+
+    def test_a_tab_laid_out_otherwise_shows_what_it_showed_and_sends_the_moved_text(self):
+        def run_pnginfo(image):
+            return "", SAVED, f"<pre>{html.escape(SAVED)}</pre>"
+
+        module = types.SimpleNamespace(run_pnginfo=run_pnginfo,
+                                       plaintext_to_html=forges_plaintext_to_html)
+        mc_saved_prompt.install_readers(**only(extras=module))
+        assert module.run_pnginfo(object()) == \
+            ("", MOVED, f"<pre>{html.escape(SAVED)}</pre>")
+
+    def test_a_tab_whose_module_names_no_html_writer_is_read_with_forge_neos(self):
+        module = extras_module(SAVED, ITEMS, names_its_writer=False)
+        mc_saved_prompt.install_readers(**only(extras=module))
+        assert module.run_pnginfo(object()) == extras_module(MOVED, ITEMS).run_pnginfo(object())
+
+    def test_a_surprise_shows_what_forge_showed(self, readers, monkeypatch):
+        def surprise(text):
+            raise RuntimeError("a surprise")
+
+        monkeypatch.setattr(mc_saved_prompt, "moved_text", surprise)
+        assert readers.extras.run_pnginfo(object()) == \
+            extras_module(SAVED, ITEMS).run_pnginfo(object())
+
+
+class TestTheSavedTextMoved:
+    """:func:`mc_saved_prompt.moved_text`: the prompt found as Forge's parse finds
+    it, moved, and every other character of the text kept."""
+
+    def test_only_the_prompts_lines_move(self):
+        assert mc_saved_prompt.moved_text(SAVED) == MOVED
+
+    def test_the_whitespace_around_the_text_is_kept(self):
+        assert mc_saved_prompt.moved_text(" \n" + SAVED + "\n\n") == " \n" + MOVED + "\n\n"
+
+    def test_a_prompt_over_several_lines_moves_as_one(self):
+        saved = "first <lora:a:1>\nsecond\n\nthird\nNegative prompt: x\n" + PARAMETER_LINE
+        assert mc_saved_prompt.moved_text(saved) == \
+            "first\nsecond\n\nthird\n<lora:a:1>\nNegative prompt: x\n" + PARAMETER_LINE
+
+    def test_the_negative_prompt_is_found_as_forge_finds_it(self):
+        saved = "<lora:a:1> a cat\n   Negative prompt: <lora:n:1> dull\n" + PARAMETER_LINE
+        moved = mc_saved_prompt.moved_text(saved)
+        assert moved == "a cat\n<lora:a:1>\n   Negative prompt: <lora:n:1> dull\n" + PARAMETER_LINE
+        for strip in (True, False):
+            assert forges_parse(moved, strip)[1:] == forges_parse(saved, strip)[1:]
+
+    def test_a_last_line_of_fewer_than_three_parameters_is_prompt_as_forge_reads_it(self):
+        saved = "<lora:a:1> a cat\nSteps: 20, Sampler: Euler"
+        moved = mc_saved_prompt.moved_text(saved)
+        assert moved == "a cat\nSteps: 20, Sampler: Euler\n<lora:a:1>"
+        assert forges_parse(moved)[0] == extra_networks.last(forges_parse(saved)[0])
+
+    @pytest.mark.parametrize("saved", [
+        "", "   ", PARAMETER_LINE, "Negative prompt: <lora:n:1> dull\n" + PARAMETER_LINE,
+        "a cat, no tags\n" + PARAMETER_LINE, MOVED,
+    ])
+    def test_a_text_with_nothing_to_move_is_the_same_string(self, saved):
+        assert mc_saved_prompt.moved_text(saved) is saved
+
+    def test_a_json_record_is_left_whole_and_a_wildcard_is_not_json(self):
+        record = '[{"prompt": "<lora:a:1> a cat"}]'
+        assert mc_saved_prompt.moved_text(record) is record
+        assert mc_saved_prompt.recalled(record) is record
+        # Read as Forge reads a saved text, this one's last line is parameters
+        # (three "key: value" in a string), and what is left is not JSON.
+        record = ('{\n  "prompt": "<lora:a:1> a cat",\n'
+                  '  "note": "Steps: 20, Sampler: Euler, CFG scale: 7"}')
+        assert len(FORGES_RE_PARAM.findall(record.split("\n")[-1])) >= 3
+        assert mc_saved_prompt.moved_text(record) is record
+        assert mc_saved_prompt.moved_text("{red|blue} <lora:a:1> coat\n" + PARAMETER_LINE) == \
+            "{red|blue} coat\n<lora:a:1>\n" + PARAMETER_LINE
+
+    def test_twice_is_once(self):
+        once = mc_saved_prompt.moved_text(SAVED)
+        assert mc_saved_prompt.moved_text(once) == once
+
+    def test_what_is_not_text_is_handed_back(self):
+        for value in (None, 3, b"<lora:a:1> a"):
+            assert mc_saved_prompt.moved_text(value) is value
+
+    def test_forges_own_pattern_is_read_and_the_copy_is_forges(self, monkeypatch):
+        assert mc_saved_prompt.PARAMETERS.pattern == FORGES_RE_PARAM.pattern
+        from modules import infotext_utils
+
+        never = re.compile(r"(?!)")
+        monkeypatch.setattr(infotext_utils, "re_param", never, raising=False)
+        assert mc_saved_prompt.moved_text("<lora:a:1> a cat\n" + PARAMETER_LINE) == \
+            "a cat\n" + PARAMETER_LINE + "\n<lora:a:1>"
+
+    def test_an_old_image_reads_as_the_same_image_saved_today(self):
+        """Over a spread of prompts the hook can save: PNG Info's text for an image
+        saved before the move is the text the wrapper writes for it today."""
+        rng = random.Random(20261123)
+        words = ["a", "cat", "neon", "street,", ",", " ", "  ", "\n", "BREAK", "(soft:1.2)",
+                 "[a:b:0.5]", "-", "+", "film grain", "<lora:x:0.85>", "<lora:y:-1>",
+                 "<lyco:z:1>", "<lora:w:1:0.5>", "__wild__", "{a|b}"]
+        checked = 0
+        for _ in range(2500):
+            prompt = " ".join(rng.choice(words) for _ in range(rng.randint(0, 9)))
+            positive = rng.choice(["", "<lora:p:1>", "masterpiece, <lora:q:0.5>", "best,"])
+            negative = rng.choice(["", "blue hat", "film grain <lora:n:1>"])
+            today = restored(prompt, positive, negative)
+            unwanted = rng.choice(["", "blurry", "<lora:n:1> dull, flat"])
+            tail = f"\nNegative prompt: {unwanted}" if unwanted else ""
+            old = f"{today}{tail}\n{PARAMETER_LINE}".strip()
+            new = mc_saved_prompt.rewrite(old, today)
+            assert mc_saved_prompt.moved_text(old) == new, (prompt, positive, negative)
+            checked += new != old
+        assert checked > 1000, "the spread moved too few texts to prove anything"
+
+
+class TestADroppedImage:
+    """An image dropped on the prompt box puts its whole saved text there
+    (``images.image_data``), for the box's paste button to read."""
+
+    def test_the_box_gets_the_text_with_its_tags_at_the_end(self, readers):
+        assert readers.images.image_data(b"png") == (MOVED, None)
+
+    def test_the_paste_button_then_reads_the_moved_prompt(self, readers):
+        text, _ = readers.images.image_data(b"png")
+        assert forges_paste(readers.script_callbacks, text)["Prompt"] == MOVED_PROMPT
+
+    def test_what_is_not_an_images_text_is_handed_back_as_it_is(self):
+        skip = object()
+        answers = iter([(skip, None), ("a cat, no tags", None), None])
+        images = types.SimpleNamespace(image_data=lambda data: next(answers))
+        mc_saved_prompt.install_readers(**only(images=images))
+        assert images.image_data(b"x") == (skip, None)
+        assert images.image_data(b"x") == ("a cat, no tags", None)
+        assert images.image_data(b"x") is None
+
+
+class TestTheRecallRunsLast:
+    """Forge runs the paste hooks in the order extensions registered them, so a
+    hook of another extension that writes the prompt back from the text it read
+    would put the tags in front again after this one had moved them."""
+
+    @staticmethod
+    def writes_it_back(infotext, params):
+        params["Prompt"] = forges_parse(infotext)[0]
+
+    def test_a_later_hook_that_writes_the_prompt_back_cannot_put_the_tags_in_front(self):
+        named = hosts(SAVED, ITEMS, self.writes_it_back)
+        mc_saved_prompt.install_readers(**named)
+        assert forges_paste(named["script_callbacks"], SAVED)["Prompt"] == MOVED_PROMPT
+
+    def test_a_later_hook_that_raises_does_not_stop_the_move(self):
+        def raises(infotext, params):
+            params["Prompt"] = SAVED_PROMPT
+            raise RuntimeError("another extension's surprise")
+
+        named = hosts(SAVED, ITEMS, raises)
+        mc_saved_prompt.install_readers(**named)
+        assert forges_paste(named["script_callbacks"], SAVED)["Prompt"] == MOVED_PROMPT
+        assert len(named["script_callbacks"].reported) == 1
+
+    def test_the_runner_called_by_keyword_moves_them_too(self):
+        named = hosts(SAVED, ITEMS, self.writes_it_back)
+        mc_saved_prompt.install_readers(**named)
+        params = {"Prompt": SAVED_PROMPT}
+        named["script_callbacks"].infotext_pasted_callback(infotext=SAVED, params=params)
+        assert params["Prompt"] == MOVED_PROMPT
+
+    def test_the_runner_answers_what_forges_answered(self):
+        module = types.SimpleNamespace(infotext_pasted_callback=lambda infotext, params: "said")
+        mc_saved_prompt.install_readers(**only(script_callbacks=module))
+        assert module.infotext_pasted_callback("text", {"Prompt": "a"}) == "said"
+        assert module.infotext_pasted_callback("text", None) == "said"
+
+
+class TestTheReadersAreWrappedBeforeTheUI:
+    """PNG Info and the prompt row take their functions as the UI is built, so
+    the wrappers go on before it: ``on_before_ui``, every build."""
+
+    def test_the_extension_wraps_them_before_the_ui_is_built(self):
+        import model_chain  # noqa: F401  -- imported for its registrations
+        from modules import script_callbacks
+
+        assert mc_saved_prompt.on_before_ui in script_callbacks.registered["before_ui"]
+
+    def test_wrapping_twice_wraps_once_and_unwrapping_puts_forges_back(self):
+        named = hosts()
+        originals = {host: getattr(named[host], name)
+                     for host, name, _, _ in mc_saved_prompt.READERS}
+        assert mc_saved_prompt.install_readers(**named) == []
+        first = {host: getattr(named[host], name) for host, name, _, _ in mc_saved_prompt.READERS}
+        assert all(first[host] is not originals[host] for host in first)
+        assert mc_saved_prompt.install_readers(**named) == []
+        for host, name, _, _ in mc_saved_prompt.READERS:
+            assert getattr(named[host], name) is first[host]
+            assert getattr(named[host], name).__wrapped__ is originals[host]
+        mc_saved_prompt.uninstall_readers(**named)
+        for host, name, _, _ in mc_saved_prompt.READERS:
+            assert getattr(named[host], name) is originals[host]
+        mc_saved_prompt.uninstall_readers(**named)
+        for host, name, _, _ in mc_saved_prompt.READERS:
+            assert getattr(named[host], name) is originals[host]
+
+    def test_the_wrappers_keep_forges_signatures(self, readers):
+        named = hosts()
+        for host, name, _, _ in mc_saved_prompt.READERS:
+            assert inspect.signature(getattr(getattr(readers, host), name)) == \
+                inspect.signature(getattr(named[host], name))
+
+    def test_a_host_without_them_is_named_once_and_nothing_raises(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="model_chain"):
+            mc_saved_prompt.on_before_ui()
+        lines = [record.getMessage() for record in caplog.records
+                 if "LoRA tags where the image holds them" in record.getMessage()]
+        assert len(lines) == 1
+        for _, _, _, label in mc_saved_prompt.READERS:
+            assert label in lines[0]
+        from modules import images, script_callbacks
+
+        assert not hasattr(images, "image_data")
+        assert not hasattr(script_callbacks, "infotext_pasted_callback")
+
+    def test_the_extensions_unload_puts_forges_back(self, monkeypatch):
+        import model_chain
+        import modules
+
+        named = hosts()
+        originals = {host: getattr(named[host], name)
+                     for host, name, _, _ in mc_saved_prompt.READERS}
+        for host in named:
+            module = types.ModuleType(f"modules.{host}")
+            vars(module).update(vars(named[host]))
+            named[host] = module
+            monkeypatch.setitem(sys.modules, f"modules.{host}", module)
+            monkeypatch.setattr(modules, host, module, raising=False)
+        monkeypatch.setattr(model_chain.mc_memory, "release_all", lambda: None)
+        monkeypatch.setattr(model_chain.mc_llm_runtime, "shutdown", lambda: None)
+        monkeypatch.setattr(model_chain.mc_broker, "clear", lambda: None)
+        mc_saved_prompt.on_before_ui()
+        for host, name, _, _ in mc_saved_prompt.READERS:
+            assert getattr(named[host], name).__wrapped__ is originals[host]
+
+        model_chain._on_script_unloaded()
+
+        for host, name, _, _ in mc_saved_prompt.READERS:
+            assert getattr(named[host], name) is originals[host]

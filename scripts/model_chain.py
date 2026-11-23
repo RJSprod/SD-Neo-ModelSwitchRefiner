@@ -4385,11 +4385,18 @@ def _on_script_unloaded():
         mc_prompt_padding.uninstall()
     except Exception:
         errors.report("Model Chain: failed to put back Forge's prompt stacking", exc_info=True)
-    # Forge's own infotext writer back, for the same reason (mc_saved_prompt).
+    # Forge's own infotext writer back, for the same reason (mc_saved_prompt),
+    # and its readers of an image's text: PNG Info, the prompt box's drop and
+    # the paste hooks' runner.
     try:
         mc_saved_prompt.uninstall()
     except Exception:
         errors.report("Model Chain: failed to put back Forge's create_infotext", exc_info=True)
+    try:
+        mc_saved_prompt.uninstall_readers()
+    except Exception:
+        errors.report("Model Chain: failed to put back Forge's readers of saved text",
+                      exc_info=True)
     # The LLM lives in another process, so releasing our own references would
     # leave it running and holding VRAM after the extension has gone. It is
     # stopped first, and the residency register cleared after, so a reload
@@ -4455,6 +4462,12 @@ try:
     # paste, which hands its parameters to this first.
     if hasattr(script_callbacks, "on_infotext_pasted"):
         script_callbacks.on_infotext_pasted(mc_saved_prompt.on_infotext_pasted)
+    # And wherever else an image's text is read back: what PNG Info shows and
+    # sends, an image dropped on the prompt box, and Forge's paste once more
+    # after every other extension's hook. Before the UI is built, because PNG
+    # Info and the prompt row take their functions as they are built.
+    if hasattr(script_callbacks, "on_before_ui"):
+        script_callbacks.on_before_ui(mc_saved_prompt.on_before_ui)
     # The first sampling step of every pass: the host has read its batch flag
     # by then, so the override puts it back there.
     if hasattr(script_callbacks, "on_cfg_denoiser"):

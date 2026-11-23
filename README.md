@@ -2046,6 +2046,22 @@ stand: the words are the same, and what differs is only what their removal
 leaves — a stray comma or space between the words, which the move tidies away,
 and line breaks at the end of the prompt instead of spaces at its start.
 
+**PNG Info shows them at the end too.** The PNG Info tab shows the text an image
+holds, so an image saved before 2026-11-03 — or by Img2Img, or by another tool —
+used to show its LoRAs wherever they were saved, even though *Send to* put them
+at the end of the box. Since 2026-11-23 the tab shows every image's prompt as the
+words, then each LoRA tag on its own line, and its *Send to* buttons read that
+same text; only the prompt's lines change (the negative prompt and the
+parameters line are shown exactly as saved), and the file itself is never
+written. An image dropped on the prompt box puts its text there the same way,
+and the move runs once more after every other extension's paste hook, so an
+extension that writes the prompt back from the text it read cannot put the tags
+in front again. A prompt the move would leave alone above is shown as saved, and
+so is a JSON record another tool keeps where Forge keeps its text. These are
+Python changes: after updating, restart Forge itself (close it and start it
+again, or *Apply and restart UI* on the Extensions tab), because *Reload UI* in
+Settings keeps the extension's modules as they were loaded.
+
 ### Why a switch is slow, and what to check
 
 Read the console. Every transition is now logged, for example:
@@ -8587,8 +8603,10 @@ mc_extra_networks_folders_ui.py  the editor of those assignments, on the tab
 mc_extra_networks_filter.py      the network pages narrowed to them; the folder buttons
 mc_infotext.py        infotext write + paste-field registration
 mc_saved_prompt.py    LoRA tags at the end of a prompt, one a line: an image's
-                      saved prompt (Forge's create_infotext, wrapped) and a
-                      recalled one (on_infotext_pasted), every model, both tabs
+                      saved prompt (Forge's create_infotext, wrapped), what PNG
+                      Info shows and sends (run_pnginfo), a dropped image's text
+                      (image_data) and a recalled prompt (on_infotext_pasted,
+                      run again after every paste hook), every model, both tabs
 mc_presets.py         named Stage 2 configurations
 mc_spatial_profiles.py     named Spatial layouts
 mc_progress.py        whole-job progress model + measured timings
