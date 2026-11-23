@@ -124,7 +124,7 @@
     const LITERAL_NEGATIVE = "mc-krea-creative-literal-negative";
     const TABS = {
         txt2img: {
-            negative: "txt2img_neg_prompt", panel: "tab_txt2img",
+            promptRow: "txt2img_prompt_row", prompt: "txt2img_prompt", panel: "tab_txt2img",
             boxes: [
                 {id: "txt2img_prompt", label: "Prompt"},
                 {id: LITERAL_POSITIVE, label: "Literal +", literal: true},
@@ -132,7 +132,7 @@
             ],
         },
         img2img: {
-            negative: "img2img_neg_prompt", panel: "tab_img2img",
+            promptRow: "img2img_prompt_row", prompt: "img2img_prompt", panel: "tab_img2img",
             boxes: [{id: "img2img_prompt", label: "Prompt"}],
         },
     };
@@ -1711,26 +1711,35 @@
 
     // -- the button -------------------------------------------------------------------
 
-    // One button per tab, in a holder of its own placed directly after the
-    // Negative Prompt's block, inside Forge's own negative prompt row: a Gradio
-    // row wraps, and the holder takes the whole line (the stylesheet's
-    // .mc-lv-launch), so the button is as wide as the boxes above it. While CFG
-    // is 1 the Literal script puts the Negative Prompt away
-    // (model_chain_literals.js), and the button is then the line under the
-    // Prompt. The Literal row is placed after this holder by that script, so
-    // the two never trade places.
+    // One button per tab, in a holder of its own on the line directly under
+    // the Prompt: after Forge's prompt row, in the column that holds the
+    // prompt rows (#<tab>_prompt_container, or the Prompts accordion's column
+    // under that prompt-box style), so it is as wide as the Prompt and every
+    // other prompt box follows it: "a single row button that is wide as the
+    // column, just like positive prompt ... It should stick to just below the
+    // positive prompt" (2026-11-23). A Gradio column gives every child the
+    // whole width by its own rule.
+    //
+    // It used to sit directly after the Negative Prompt's block, inside that
+    // block's Gradio form, and to take the whole line by the stylesheet's
+    // flex basis -- which Gradio's own `div.svelte-… > * { flex: 1 1 0% }`
+    // on a form's children outranks (0,1,1 against 0,1,0), so on a real page
+    // the button stood beside the Negative Prompt, half the width, and the
+    // Literal row beside both on a wide window. Measured on Gradio 4.40 with
+    // Forge Neo's prompt rows; a stand-in without the form wrapper had said it
+    // took the line.
     //
     // Checked on every update and moved or added only when it is not already
     // there: an after-update callback that changed the page every time would
-    // raise the next update itself. A page without a Negative Prompt (a theme
-    // that took it out) gets nothing -- the viewer is still mcLoraViewer.open().
+    // raise the next update itself. A page without Forge's prompt row (a
+    // theme that rebuilt the prompt area) has the button after the Prompt's
+    // own block instead, where the stylesheet gives it the line with a rule
+    // that outranks the form's; a page without either gets nothing -- the
+    // viewer is still mcLoraViewer.open().
     function launcher(tab) {
         const holder = document.createElement("div");
         holder.id = "mc-lora-viewer-launch-" + tab;
         holder.className = "mc-lv-launch";
-        // The mark the Literal script places its row after
-        // (model_chain_literals.js, place): it finds this by the mark alone.
-        holder.setAttribute("data-mc-under-negative", "");
         const button = document.createElement("button");
         button.type = "button";
         button.id = "mc-lora-viewer-" + tab;
@@ -1745,13 +1754,20 @@
         return holder;
     }
 
-    function ensureButton(tab) {
+    function anchorOf(tab) {
         const conf = TABS[tab];
-        const negative = byId(conf.negative);
-        if (!negative || !negative.parentNode) return false;
+        const row = byId(conf.promptRow);
+        if (row && row.parentNode) return row;
+        const prompt = byId(conf.prompt);
+        return prompt && prompt.parentNode ? prompt : null;
+    }
+
+    function ensureButton(tab) {
+        const anchor = anchorOf(tab);
+        if (!anchor) return false;
         const holder = byId("mc-lora-viewer-launch-" + tab) || launcher(tab);
-        if (negative.nextElementSibling === holder) return true;
-        negative.parentNode.insertBefore(holder, negative.nextSibling);
+        if (anchor.nextElementSibling === holder) return true;
+        anchor.parentNode.insertBefore(holder, anchor.nextSibling);
         return true;
     }
 

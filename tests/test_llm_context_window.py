@@ -465,6 +465,14 @@ class TestCompact:
 
         outcome = send(conversation, "hello?", "s-1")
         let_go.set()
+        # The compaction ends after the test's own answer: waited for, or it
+        # writes the thread's window after the data folder is handed back --
+        # into the checkout, which the conftest guard fails at teardown.
+        key = store_module.Key(character="Ada", thread_id=conversation.identifier)
+        deadline = time.monotonic() + 10
+        while compact.running(key) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not compact.running(key), "the compaction did not finish"
 
         assert outcome["ok"] is False
         assert outcome["error"]["code"] == service.THREAD_BUSY

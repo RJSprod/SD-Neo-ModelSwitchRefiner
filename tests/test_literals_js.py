@@ -354,6 +354,28 @@ class TestThePlacement:
         assert found["afterNegative"] is True
         assert found["rowParentIsToprow"] is True
 
+    def test_on_forges_page_it_takes_the_line_after_the_negative_prompts_row(self):
+        """Forge Neo wraps each prompt in a row of its own inside the prompt
+        column. The Literal row goes after the Negative Prompt's row, in that
+        column, so it has a line of its own: inside the row, Gradio's rule on a
+        form's children stood it beside the Negative Prompt on a wide window
+        (2026-11-23)."""
+        found = run("""
+            const negativeRow = make("div", "txt2img_neg_prompt_row", toprow);
+            negativeRow.appendChild(negative);
+            mc.place();
+            mc.place();
+            report({afterRow: row.previousElementSibling === negativeRow,
+                    inColumn: row.parentNode === toprow,
+                    insideRow: negativeRow.children.indexOf(row) >= 0,
+                    anchor: mc.anchor() === negativeRow,
+                    placed: mc.report().placed});
+        """)
+
+        assert found["afterRow"] is True and found["inColumn"] is True
+        assert found["insideRow"] is False and found["anchor"] is True
+        assert found["placed"] is True
+
     def test_moving_it_twice_leaves_it_where_it_was(self):
         """`onAfterUiUpdate` fires often, so this runs many times per session."""
         found = run("""
