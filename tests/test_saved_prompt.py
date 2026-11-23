@@ -1,19 +1,23 @@
-"""LoRA tags at the end of an image's saved prompt (mc_saved_prompt).
+"""LoRA tags at the end of a prompt, one a line, saved and recalled (mc_saved_prompt).
 
 The user's report: an image made here, read back in PNG Info, has every LoRA at
-the front of its prompt, and they want them at the end. The front is this
+the front of its prompt, and they want them at the end (2026-11-03) -- when an
+image is recalled into the prompt box as well, on every model ("krea, moss,
+sdxl, etc"), and each tag on a line of its own (2026-11-23). The front is this
 extension's doing -- every bare tag is lifted out of the Txt2Img prompt and put
 back in front of it before Forge sees it -- so the fix moves them in the saved
-text alone. Three things have to hold, and each class below is one of them:
+text and the recalled text alone. Four things have to hold, and each class
+below is one of them:
 
-* the move itself: tags at the end, in the order they had, the words tidied
-  as a paste of them would tidy them;
+* the move itself: the words, then each tag on its own line in the order they
+  had, the words tidied as a paste of them would tidy them;
 * what makes the move safe: pasting the saved text back gives Stage 1 the same
   prompt as pasting the text Forge would have saved before, for every prompt
   the hook can produce;
 * the wiring: Forge's ``create_infotext`` is wrapped without being made to
-  compute anything differently, only a generation the hook lifted tags in is
-  rewritten, and the hook marks exactly those.
+  compute anything differently, and every generation's text is rewritten;
+* the recall: every recalled prompt comes back in the same shape, whatever
+  made the image.
 """
 
 from __future__ import annotations
@@ -54,25 +58,37 @@ def restored(prompt: str, positive: str = "", negative: str = "") -> str:
 
 
 class TestTheMove:
-    def test_tags_go_to_the_end_in_the_order_they_had(self):
+    def test_tags_go_to_the_end_in_the_order_they_had_one_a_line(self):
         line = "<lora:realfilter_v2:0.85> <lora:contrast:-6> a woman in the rain, soft light"
         assert extra_networks.last(line) == (
-            "a woman in the rain, soft light <lora:realfilter_v2:0.85> <lora:contrast:-6>")
+            "a woman in the rain, soft light\n<lora:realfilter_v2:0.85>\n<lora:contrast:-6>")
 
     def test_the_words_are_tidied_as_a_paste_would_tidy_them(self):
         line = "<lora:a:1>, a cat, <lora:b:0.5>, on a mat"
-        assert extra_networks.last(line) == "a cat, on a mat <lora:a:1> <lora:b:0.5>"
+        assert extra_networks.last(line) == "a cat, on a mat\n<lora:a:1>\n<lora:b:0.5>"
 
     def test_every_kind_the_hook_lifts_moves_and_case_does_not_matter(self):
         line = "<LoRA:a:1> <lyco:b:1> <hypernet:c:1> words"
-        assert extra_networks.last(line) == "words <LoRA:a:1> <lyco:b:1> <hypernet:c:1>"
+        assert extra_networks.last(line) == "words\n<LoRA:a:1>\n<lyco:b:1>\n<hypernet:c:1>"
 
     def test_a_line_without_tags_is_the_same_string(self):
         line = "a quiet street,  at dusk "
         assert extra_networks.last(line) is line
 
-    def test_a_line_of_tags_alone_is_left_as_it_is(self):
-        assert extra_networks.last("<lora:a:1> <lora:b:2>") == "<lora:a:1> <lora:b:2>"
+    def test_a_line_of_tags_alone_is_one_tag_a_line(self):
+        assert extra_networks.last("<lora:a:1> <lora:b:2>") == "<lora:a:1>\n<lora:b:2>"
+
+    def test_tags_already_at_the_end_on_one_line_are_given_a_line_each(self):
+        line = "a cat, on a mat <lora:a:1> <lora:b:0.5>"
+        assert extra_networks.last(line) == "a cat, on a mat\n<lora:a:1>\n<lora:b:0.5>"
+
+    def test_a_text_already_in_shape_comes_back_equal_and_twice_is_once(self):
+        shaped = "a cat, on a mat\n<lora:a:1>\n<lora:b:0.5>"
+        assert extra_networks.last(shaped) == shaped
+        for line in ("<lora:a:1>, a cat, <lora:b:0.5>, on a mat", "x <lora:a:1>\n\ny",
+                     "<lora:only:1>"):
+            once = extra_networks.last(line)
+            assert extra_networks.last(once) == once
 
     def test_a_line_that_still_holds_brackets_is_left_as_it_is(self):
         line = "<lora:a:1> [[__wildcard__]] words"
@@ -85,7 +101,11 @@ class TestTheMove:
 
     def test_lines_are_kept(self):
         line = "<lora:a:1> first line\nsecond line"
-        assert extra_networks.last(line) == "first line\nsecond line <lora:a:1>"
+        assert extra_networks.last(line) == "first line\nsecond line\n<lora:a:1>"
+
+    def test_tags_between_lines_join_the_others_at_the_end(self):
+        line = "first line <lora:a:1>\n<lora:b:1>\nsecond line"
+        assert extra_networks.last(line) == "first line\n\nsecond line\n<lora:a:1>\n<lora:b:1>"
 
 
 class TestAPasteGeneratesWhatItDidBefore:
@@ -125,9 +145,9 @@ class TestAPasteGeneratesWhatItDidBefore:
             assert stage_one(moved) == stage_one(today), (prompt, positive, negative)
             if moved != today:
                 checked += 1
-                tags = extra_networks._TAG.findall
-                assert tags(moved) == tags(today)
-                assert moved.endswith(tags(today)[-1])
+                tags = extra_networks._TAG.findall(today)
+                assert extra_networks._TAG.findall(moved) == tags
+                assert moved.split("\n")[-len(tags):] == tags
         assert checked > 1000, "the spread moved too few lines to prove anything"
 
 
@@ -168,14 +188,11 @@ def get_hr_prompt(p, index, prompt_text, **kwargs):
     return hr_prompt if hr_prompt != prompt_text else None
 
 
-def processing_object(prompts, *, lifted=True, negatives=None, batch_size=1):
-    p = types.SimpleNamespace(
+def processing_object(prompts, *, negatives=None, batch_size=1):
+    return types.SimpleNamespace(
         batch_size=batch_size, all_negative_prompts=negatives or [""] * len(prompts),
         main_prompt=prompts[0], main_negative_prompt=(negatives or [""])[0],
         all_hr_prompts=list(prompts), extra_generation_params={"Hires prompt": get_hr_prompt})
-    if lifted:
-        mc_saved_prompt.mark(p)
-    return p
 
 
 @pytest.fixture
@@ -190,11 +207,13 @@ FRONT = "<lora:a:1> <lora:b:0.5> a woman in the rain"
 
 
 class TestTheWrapper:
-    def test_a_lifted_generations_prompt_line_ends_with_its_tags(self, host_module):
+    def test_a_generations_prompt_ends_with_its_tags_one_a_line(self, host_module):
         p = processing_object([FRONT], negatives=["<lora:neg:1> blurry"])
         text = host_module.create_infotext(p, [FRONT], [7], [0])
         assert text.splitlines() == [
-            "a woman in the rain <lora:a:1> <lora:b:0.5>",
+            "a woman in the rain",
+            "<lora:a:1>",
+            "<lora:b:0.5>",
             "Negative prompt: <lora:neg:1> blurry",
             "Steps: 20, Seed: 7",
         ]
@@ -207,24 +226,46 @@ class TestTheWrapper:
         assert "Hires prompt" not in text
         assert text == extra_networks.last(FRONT) + "\nSteps: 20, Seed: 7"
 
-    def test_a_generation_the_hook_did_not_lift_is_left_as_forge_wrote_it(self,
-                                                                          host_module):
-        p = processing_object([FRONT], lifted=False)
-        assert host_module.create_infotext(p, [FRONT], [7], [0]) == \
-            forges_create_infotext(p, [FRONT], [7], [0])
+    def test_every_generation_is_moved_whatever_ran_on_it(self, host_module):
+        """Img2Img, a model the Krea hook stands down for, another extension's
+        pass: nothing marks the processing object, and the text moves all the
+        same ("regardless of the model", 2026-11-23)."""
+        typed = "a portrait, <lora:moss_style:0.6> soft light"
+        p = processing_object([typed])
+        assert not vars(p).keys() - {"batch_size", "all_negative_prompts", "main_prompt",
+                                     "main_negative_prompt", "all_hr_prompts",
+                                     "extra_generation_params"}
+        text = host_module.create_infotext(p, [typed], [7], [0])
+        assert text == "a portrait, soft light\n<lora:moss_style:0.6>\nSteps: 20, Seed: 7"
+
+    def test_a_prompt_without_tags_is_left_as_forge_wrote_it(self, host_module):
+        plain = "a woman in the rain,  soft light"
+        p = processing_object([plain])
+        assert host_module.create_infotext(p, [plain], [7], [0]) == \
+            forges_create_infotext(p, [plain], [7], [0])
+
+    def test_the_saved_text_parses_back_to_the_moved_prompt(self, host_module):
+        """Forge's parse reads a prompt over several lines, so the tags on their
+        own lines come back with the prompt and not as parameters."""
+        p = processing_object([FRONT], negatives=["blurry"])
+        text = host_module.create_infotext(p, [FRONT], [7], [0])
+        *lines, last_line = text.split("\n")
+        prompt_lines = [line for line in lines if not line.startswith("Negative prompt:")]
+        assert "\n".join(prompt_lines) == extra_networks.last(FRONT)
+        assert last_line == "Steps: 20, Seed: 7"
 
     def test_the_index_is_forges_and_so_is_the_main_prompt(self, host_module):
         prompts = ["<lora:a:1> zero", "<lora:b:1> one", "<lora:c:1> two", "<lora:d:1> three"]
         p = processing_object(prompts, batch_size=2)
         third = host_module.create_infotext(p, prompts, [0, 1, 2, 3], [0] * 4,
                                             iteration=1, position_in_batch=0)
-        assert third.splitlines()[0] == "two <lora:c:1>"
+        assert third.splitlines()[:2] == ["two", "<lora:c:1>"]
         second = host_module.create_infotext(p, prompts, [0, 1, 2, 3], [0] * 4, index=1)
-        assert second.splitlines()[0] == "one <lora:b:1>"
+        assert second.splitlines()[:2] == ["one", "<lora:b:1>"]
         p.main_prompt = "<lora:g:1> the grid"
         grid = host_module.create_infotext(p, prompts, [0, 1, 2, 3], [0] * 4,
                                            use_main_prompt=True)
-        assert grid.splitlines()[0] == "the grid <lora:g:1>"
+        assert grid.splitlines()[:2] == ["the grid", "<lora:g:1>"]
 
     def test_a_prompt_with_nothing_after_it_still_moves(self):
         """Forge strips the whole text, so a prompt ending in a space and
@@ -234,7 +275,7 @@ class TestTheWrapper:
         assert mc_saved_prompt.install(module)
         p = processing_object([FRONT + " "])
         assert module.create_infotext(p, [FRONT + " "], [7], [0]) == \
-            "a woman in the rain <lora:a:1> <lora:b:0.5>"
+            "a woman in the rain\n<lora:a:1>\n<lora:b:0.5>"
 
     def test_text_that_does_not_start_with_the_prompt_is_left_alone(self):
         module = types.SimpleNamespace(
@@ -272,25 +313,37 @@ class TestTheWrapper:
 
 
 # --------------------------------------------------------------------------- #
-# The hook marks exactly the generations it lifted tags in
+# A Txt2Img generation through the hook saves its tags at the end
 # --------------------------------------------------------------------------- #
 
 
-class TestTheHookMarks:
-    def test_a_bare_tag_in_the_prompt_marks_the_generation(self, script, store, host):
+class TestThroughTheHook:
+    """Stage 1 is given the tags in front, as it always was; the text saved for
+    it has them at the end. Nothing is marked on the processing object any more:
+    every generation's text moves (2026-11-23)."""
+
+    def test_stage_one_gets_them_in_front_and_the_image_saves_them_at_the_end(
+            self, script, store, host, host_module):
         p = generate(script, "a woman <lora:realfilter:1>", enabled=False)
         assert p.prompt == "<lora:realfilter:1> a woman"
-        assert mc_saved_prompt.lifted(p)
+        saved = host_module.create_infotext(processing_object([p.prompt]), [p.prompt],
+                                            [7], [0])
+        assert saved.splitlines()[:2] == ["a woman", "<lora:realfilter:1>"]
 
-    def test_a_tag_in_a_literal_box_marks_it(self, script, store, host):
+    def test_a_tag_from_a_literal_box_is_saved_at_the_end_too(self, script, store, host,
+                                                              host_module):
         p = generate(script, "a woman", enabled=False, literal_positive="<lora:x:1>",
                      literal_negative="blue hat")
-        assert mc_saved_prompt.lifted(p)
+        saved = host_module.create_infotext(processing_object([p.prompt]), [p.prompt],
+                                            [7], [0])
+        assert saved.splitlines()[:2] == ["a woman blue hat", "<lora:x:1>"]
 
-    def test_a_prompt_with_no_tag_anywhere_is_not_marked(self, script, store, host):
-        p = generate(script, "a woman [[__wildcard__]]", enabled=False,
-                     literal_positive="masterpiece", literal_negative="blue hat")
-        assert not mc_saved_prompt.lifted(p)
+    def test_the_mark_is_gone_from_both_sides(self):
+        import model_chain_krea_creative as creative_script
+
+        for name in ("mark", "lifted", "MARK", "LIFTED_KEYS"):
+            assert not hasattr(mc_saved_prompt, name), name
+        assert not hasattr(creative_script, "_mark_lifted")
 
 
 # --------------------------------------------------------------------------- #
@@ -300,43 +353,61 @@ class TestTheHookMarks:
 
 class TestARecalledPromptEndsWithItsTags:
     """The user's second half (2026-11-06): *when recalling a png info, i would
-    like those lora appended as well when brought back into prompt box.* An
-    image saved before 2026-11-03 has its tags in front, and Forge's paste
-    hands the parsed parameters to ``on_infotext_pasted`` before it fills a
-    field, so that is where the box's text is decided."""
+    like those lora appended as well when brought back into prompt box*; and
+    (2026-11-23) *All lora loaded from info text should appear appended to the
+    prompt at the end, separated by a new line*, *regardless of the model
+    (krea, moss, sdxl, etc)*. Forge's paste hands the parsed parameters to
+    ``on_infotext_pasted`` before it fills a field, so that is where the box's
+    text is decided -- for every image, whatever made it."""
 
     LIFTED = {"Krea Literal Command Count": "2", "Krea Literal Syntax Version": "1"}
-
-    def test_the_keys_are_the_ones_the_hook_writes(self):
-        import mc_infotext
-
-        assert set(mc_saved_prompt.LIFTED_KEYS) == {mc_infotext.LITERAL_COUNT,
-                                                     mc_infotext.LITERAL_VERSION}
 
     def test_an_image_saved_with_its_tags_in_front_recalls_them_at_the_end(self):
         params = {"Prompt": "<lora:a:1> <lora:b:0.5> a woman, red coat", **self.LIFTED}
         mc_saved_prompt.on_infotext_pasted("text", params)
-        assert params["Prompt"] == "a woman, red coat <lora:a:1> <lora:b:0.5>"
+        assert params["Prompt"] == "a woman, red coat\n<lora:a:1>\n<lora:b:0.5>"
 
     def test_the_recalled_box_gives_stage_one_what_the_image_was_made_from(self):
         saved = restored("a woman <lora:a:1>, red coat <lora:b:0.5>")
         assert saved.startswith("<lora:a:1> <lora:b:0.5>")
         params = {"Prompt": saved, **self.LIFTED}
         mc_saved_prompt.on_infotext_pasted("text", params)
-        assert params["Prompt"].endswith("<lora:a:1> <lora:b:0.5>")
+        assert params["Prompt"].split("\n")[-2:] == ["<lora:a:1>", "<lora:b:0.5>"]
         assert stage_one(params["Prompt"]) == stage_one(saved)
 
-    def test_an_image_without_the_hooks_record_keeps_its_tags_where_typed(self):
-        """Img2Img and other tools: nothing lifts the tags back there, so a
-        move would change what the box generates."""
-        params = {"Prompt": "<lora:a:1> a woman"}
+    @pytest.mark.parametrize("model", ["krea2_dev", "moss_image_v1", "sdxl_base_1.0",
+                                       "flux2_klein_9b", None])
+    def test_an_image_without_the_hooks_record_recalls_them_at_the_end_too(self, model):
+        """Img2Img, another tool, any model: the record of this extension's
+        lift no longer decides anything."""
+        params = {"Prompt": "<lora:a:1> a woman, <lora:b:0.5>, red coat"}
+        if model:
+            params["Model"] = model
         mc_saved_prompt.on_infotext_pasted("text", params)
-        assert params["Prompt"] == "<lora:a:1> a woman"
+        assert params["Prompt"] == "a woman, red coat\n<lora:a:1>\n<lora:b:0.5>"
+
+    def test_tags_typed_at_the_end_on_one_line_are_given_a_line_each(self):
+        params = {"Prompt": "a woman, red coat, <lora:a:1>, <lora:b:0.5>"}
+        mc_saved_prompt.on_infotext_pasted("text", params)
+        assert params["Prompt"] == "a woman, red coat\n<lora:a:1>\n<lora:b:0.5>"
+
+    def test_a_prompt_without_tags_is_left_as_it_was(self):
+        params = {"Prompt": "a woman,  red coat\n\nsecond line "}
+        mc_saved_prompt.on_infotext_pasted("text", params)
+        assert params["Prompt"] == "a woman,  red coat\n\nsecond line "
 
     def test_a_prompt_a_move_could_change_is_left_alone(self):
         params = {"Prompt": "<lora:a:1> a woman [[keep]]", **self.LIFTED}
         mc_saved_prompt.on_infotext_pasted("text", params)
         assert params["Prompt"] == "<lora:a:1> a woman [[keep]]"
+        params = {"Prompt": "a woman -<lora:a:1>"}
+        mc_saved_prompt.on_infotext_pasted("text", params)
+        assert params["Prompt"] == "a woman -<lora:a:1>"
+
+    def test_the_negative_prompt_is_left_where_it_was_typed(self):
+        params = {"Prompt": "<lora:a:1> a woman", "Negative prompt": "<lora:n:1> blurry"}
+        mc_saved_prompt.on_infotext_pasted("text", params)
+        assert params["Negative prompt"] == "<lora:n:1> blurry"
 
     def test_nothing_odd_raises(self):
         for params in (None, {}, {"Prompt": None, **self.LIFTED}, {"Prompt": 3}):

@@ -3,8 +3,8 @@
 // Three jobs, all of them presentation, none of them able to change what a
 // generation produces:
 //
-//   1. Move the Literal Prompt row up under the native Negative Prompt (and
-//      under the LoRA viewer's button, which has the line just below it).
+//   1. Move the Literal Prompt row up to the line under the native Negative
+//      Prompt's row, in the column that holds the prompt rows.
 //   2. Put its two boxes into Forge's own "last prompt box you used" family,
 //      so the Extra Networks browser inserts into whichever of the four you
 //      touched last -- and offer them to Tag Autocomplete, if it is installed.
@@ -63,11 +63,11 @@
         negative: "mc-krea-creative-literal-negative",
         prompt: "txt2img_prompt",
         negativePrompt: "txt2img_neg_prompt",
+        negativeRow: "txt2img_neg_prompt_row",
         cfg: "txt2img_cfg_scale",
     };
 
     const COLLAPSED = "mc-literal-cfg-collapsed";
-    const UNDER_NEGATIVE = "data-mc-under-negative";
 
     function root() {
         const app = typeof gradioApp === "function" ? gradioApp() : document;
@@ -102,26 +102,30 @@
     // 1. Where the row sits
     // ------------------------------------------------------------------ //
 
+    // The row's place: the line after Forge's Negative Prompt row, in the
+    // column that holds the prompt rows, so each box is as wide as the
+    // Prompt. It used to go inside that row, after the Negative Prompt's own
+    // block -- in Gradio's form there, whose rule gives every child
+    // `flex: 1 1 0%` -- and on a wide window it stood beside the Negative
+    // Prompt instead of under it (2026-11-23, measured on Gradio 4.40 with
+    // Forge Neo's prompt rows). A page without that row (a theme that rebuilt
+    // the prompt area) has it after the Negative Prompt's block, as before.
+    function anchor() {
+        const row = byId(IDS.negativeRow);
+        if (row && row.parentNode) return row;
+        const negative = byId(IDS.negativePrompt);
+        return negative && negative.parentNode ? negative : null;
+    }
+
     function place() {
         const row = byId(IDS.row);
-        const negative = byId(IDS.negativePrompt);
-        if (!row || !negative || !negative.parentNode) return;
-        // Under whatever another script keeps directly under the Negative
-        // Prompt and marks as doing so (`data-mc-under-negative`: the LoRA
-        // viewer's button, model_chain_lora_viewer.js), which goes between the
-        // prompt boxes and the Literal row. Anchoring on the Negative Prompt
-        // alone would move the row back above that element on the next update,
-        // and its script would move it back above the row on the one after -- a
-        // to-and-fro on every update. Found by the mark, never by a name: this
-        // file does not learn what the other one is for.
-        const next = negative.nextElementSibling;
-        const anchor = next && next !== row && next.hasAttribute
-            && next.hasAttribute(UNDER_NEGATIVE) ? next : negative;
+        const after = anchor();
+        if (!row || !after) return;
         // Already immediately after its anchor: nothing to do, and checking is
         // what makes this safe to run on every UI update.
-        if (row.previousElementSibling === anchor) return;
+        if (row.previousElementSibling === after) return;
         try {
-            anchor.parentNode.insertBefore(row, anchor.nextSibling);
+            after.parentNode.insertBefore(row, after.nextSibling);
         } catch (error) {
             // A theme that has restructured the toprow, or a Forge build that
             // renames the negative prompt. The row stays where Gradio put it,
@@ -381,8 +385,7 @@
             thirdPartyBoxes: thirdPartyBoxes(),
             liftedThirdParty: lifted,
             promptFamily: !!family(),
-            placed: !!row && !!byId(IDS.negativePrompt)
-                    && row.previousElementSibling === byId(IDS.negativePrompt),
+            placed: !!row && !!anchor() && row.previousElementSibling === anchor(),
         };
     }
 
@@ -497,6 +500,7 @@
     window.modelChainLiterals = {
         wire: wire,
         place: place,
+        anchor: anchor,
         registerPrompts: registerPrompts,
         applyCfg: applyCfg,
         cfg: cfg,

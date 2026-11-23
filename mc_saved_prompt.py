@@ -1,4 +1,4 @@
-"""LoRA tags at the end of an image's saved prompt.
+"""LoRA tags at the end of a prompt, one a line: saved and recalled.
 
 On Txt2Img every extra-network tag in the prompt is lifted out before any
 prompt writer can reword it, and put back *in front of* the finished prompt
@@ -6,32 +6,46 @@ prompt writer can reword it, and put back *in front of* the finished prompt
 runs on every generation, Creative Mode on or off, and the ``Prompt:`` line
 Forge saves into the image is that finished string -- so every image read back
 in PNG Info had its LoRAs at the front, and the user asked for them at the end
-(2026-11-03).
+(2026-11-03), on every model ("krea, moss, sdxl, etc"), and each on a line of
+its own "so its very clean" (2026-11-23)::
 
-What this changes is the saved text and nothing else. Forge's
-``processing.create_infotext`` is wrapped once, at app start, and the wrapper
-moves the tags to the end of the ``Prompt:`` line of the text Forge built
-(:func:`prompt_master.krea.extra_networks.last`). The prompt Forge generates
-from is not touched, so an image is made exactly as before; and a paste of the
-saved text gives Stage 1 the same prompt either way, because the tags are
-lifted to the front again before Forge reads it.
+    a woman in the rain, soft light
+    <lora:realfilter_v2:0.85>
+    <lora:contrast:-6>
 
-Every copy of the saved text comes through that one function: the PNG's text,
-the gallery's text under the picture, ``params.txt`` (Forge's paste with an
-empty prompt), a grid's text, the picture saved before hires fix, and Model
-Chain's Stage 2 text, which calls the function through Forge's module for this
-reason.
+Two places, one move (:func:`prompt_master.krea.extra_networks.last`):
 
-Only a generation whose tags this extension lifted is rewritten: the Krea hook
-marks its ``p`` (:func:`mark`) when a payload it placed holds a tag. Img2Img
-has no such hook, so a tag there stays where it was typed -- moving it would
-change what a paste of the text generates, because nothing there lifts it back.
+* **The text an image saves.** Forge's ``processing.create_infotext`` is
+  wrapped once, at app start, and the wrapper rewrites the head of the text
+  Forge built -- its ``Prompt:`` line, which may be several lines -- for every
+  generation on both tabs. The prompt Forge generates from is not touched, so
+  an image is made exactly as before. Every copy of the saved text comes
+  through that one function: the PNG's text, the gallery's text under the
+  picture, ``params.txt`` (Forge's paste with an empty prompt), a grid's text,
+  the picture saved before hires fix, and Model Chain's Stage 2 text, which
+  calls the function through Forge's module for this reason.
+* **The prompt a recalled image puts in the box.** ``on_infotext_pasted``
+  moves the tags of every recalled prompt, whatever made it -- an image from
+  before 2026-11-03 with its tags in front, an Img2Img image, another tool's.
 
-Nothing is computed differently inside Forge's function: the text is built
-exactly as Forge builds it (its ``Hires prompt`` comparison included, which
-reads the prompt as Forge has it) and only the head of the result is
-replaced, and only when the result starts with the prompt Forge put there. Any
-surprise leaves Forge's text as it was.
+What a paste of the moved text generates: on Txt2Img exactly what the old
+order did, because the hook lifts the same tags in the same order wherever
+they stand and puts them in front again before Forge reads the prompt
+(``tests/test_saved_prompt.py`` holds that over a spread of prompts). On
+Img2Img nothing lifts them, so Forge reads the box as it stands and takes the
+tags out where they are: the words are the same, and what differs is only
+what the tags' removal leaves behind -- a stray comma or space between the
+words, which the move tidies away, and line breaks at the end rather than
+spaces at the start. The user asked for the order regardless of that.
+
+A prompt a move could change the meaning of is left as it was -- one still
+holding a ``[[`` command, or with a tag right after a ``+`` or ``-``
+(:func:`extra_networks.last`) -- and so is any text this cannot read. Nothing
+is computed differently inside Forge's function: the text is built exactly as
+Forge builds it (its ``Hires prompt`` comparison included, which reads the
+prompt as Forge has it) and only the head of the result is replaced, and only
+when the result starts with the prompt Forge put there. Any surprise leaves
+Forge's text as it was.
 """
 
 from __future__ import annotations
@@ -41,25 +55,8 @@ import logging
 
 logger = logging.getLogger("model_chain")
 
-MARK = "_model_chain_tags_lifted"
-"""The attribute :func:`mark` sets on a processing object."""
-
 _WRAPPED = "_model_chain_saved_prompt"
 """Set on the wrapper, so a second install finds it and does nothing."""
-
-
-def mark(p) -> None:
-    """Say that this generation's prompt had its tags lifted in front of it."""
-    try:
-        setattr(p, MARK, True)
-    except Exception:
-        logger.debug("Model Chain: could not mark the generation's saved prompt",
-                     exc_info=True)
-
-
-def lifted(p) -> bool:
-    """Whether :func:`mark` was called on ``p``."""
-    return bool(getattr(p, MARK, False))
 
 
 def prompt_of(signature, args, kwargs):
@@ -86,7 +83,7 @@ def prompt_of(signature, args, kwargs):
 
 
 def rewrite(result, prompt_text):
-    """``result`` with its first line's prompt given the tags at the end.
+    """``result`` with its prompt given the tags at the end, one a line.
 
     Forge returns ``f"{prompt}{negative}\\n{parameters}".strip()``, so the text
     starts with the prompt, less any leading whitespace (and less trailing
@@ -133,9 +130,6 @@ def install(module=None) -> bool:
     def create_infotext(*args, **kwargs):
         result = original(*args, **kwargs)
         try:
-            p = args[0] if args else kwargs.get("p")
-            if not lifted(p):
-                return result
             return rewrite(result, prompt_of(signature, args, kwargs))
         except Exception:
             logger.debug("Model Chain: left a saved prompt as Forge wrote it", exc_info=True)
@@ -162,43 +156,24 @@ def on_app_started(_demo=None, _app=None) -> None:
     try:
         if not install():
             logger.warning("Model Chain: Forge has no create_infotext this build can wrap, "
-                           "so saved prompts keep their LoRA tags in front")
+                           "so saved prompts keep their LoRA tags where Forge put them")
     except Exception:
         logger.warning("Model Chain: could not wrap Forge's create_infotext", exc_info=True)
 
 
-LIFTED_KEYS = ("Krea Literal Command Count", "Krea Literal Syntax Version")
-"""The image's own word that this extension lifted payloads out of its prompt.
+def recalled(prompt) -> str:
+    """``prompt`` with its LoRA tags after the words, one a line.
 
-``mc_infotext.LITERAL_COUNT`` and ``LITERAL_VERSION``, spelled out rather than
-imported so this module stays importable without the infotext module's own
-imports. Every generation the Krea hook lifted a LoRA tag in writes them (a
-protected tag is a literal command), so they are what tells a recalled prompt
-whose tags this extension put in front from one whose tags were typed there."""
-
-
-def recalled(prompt, params) -> str:
-    """``prompt`` with its LoRA tags at the end, when the image says they were lifted.
-
-    The text that goes back into the prompt box when an image is recalled.
-    Images saved before 2026-11-03 carry their LoRA tags in front -- the Krea
-    hook's literal restore put them there and Forge saved that string -- and the
-    user asked for them at the end in the prompt box as well as in the saved
-    text (2026-11-06). Moving them changes nothing that is generated from the
-    box on Txt2Img: :func:`prompt_master.krea.extra_networks.protect` lifts the
-    same tags in the same order, wherever they stand, and the restore puts them
-    in front again (``tests/test_saved_prompt.py`` holds that both saved lines
-    paste to the same Stage 1 prompt).
-
-    Only an image whose record says this extension lifted its tags is changed:
-    a prompt without that record -- an Img2Img image, another tool's, one with
-    no tag lifted -- has its tags where somebody typed them, and nothing here
-    knows better. And :func:`extra_networks.last` refuses whatever a move could
-    change the meaning of (a line still holding ``[[``, a tag after a sign).
+    The text that goes back into the prompt box when an image is recalled,
+    whatever made the image (2026-11-23: "regardless of the model"). Images
+    saved before 2026-11-03 carry their tags in front -- the Krea hook's literal
+    restore put them there and Forge saved that string -- and an image from
+    Img2Img or another tool carries them where they were typed; all of them
+    come back with the tags at the end. :func:`extra_networks.last` refuses
+    whatever a move could change the meaning of (a line still holding ``[[``,
+    a tag after a sign), and anything that is not text is handed back as it is.
     """
-    if not isinstance(prompt, str) or not isinstance(params, dict):
-        return prompt
-    if not any(key in params for key in LIFTED_KEYS):
+    if not isinstance(prompt, str):
         return prompt
     from prompt_master.krea import extra_networks
 
@@ -206,7 +181,7 @@ def recalled(prompt, params) -> str:
 
 
 def on_infotext_pasted(_infotext, params) -> None:
-    """Put a recalled prompt's LoRA tags at its end. Never raises.
+    """Put a recalled prompt's LoRA tags at its end, one a line. Never raises.
 
     ``script_callbacks.on_infotext_pasted``: Forge calls it with the parsed
     parameters before it fills a single field, from PNG Info's Send to buttons,
@@ -216,7 +191,7 @@ def on_infotext_pasted(_infotext, params) -> None:
     """
     try:
         prompt = params.get("Prompt") if isinstance(params, dict) else None
-        moved = recalled(prompt, params)
+        moved = recalled(prompt)
         if isinstance(moved, str) and moved != prompt:
             params["Prompt"] = moved
     except Exception:

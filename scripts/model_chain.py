@@ -200,6 +200,21 @@ line) are not things anybody reads twice. Off puts it straight back -- no
 reload, because the rule is CSS keyed on an attribute this reads live.
 """
 
+OPT_SETTINGS_MANAGER = "model_chain_settings_manager"
+"""Lay the generation tabs' settings out as accordions, with a Settings Manager.
+Read by javascript/model_chain_settings_manager.js.
+
+The ask (2026-11-23): "i want everything that is not prompt (positive,
+negative, literal, and lora viewer), to be in an accordion ... generation config
+like batch and resolution should be collapsible as well ... a last item added to
+this list that is a "Settings Manager", which would have options for me to
+rearrange or show/hide the other accordions in real time." On Txt2Img and
+Img2Img every block under the prompt boxes becomes a section -- a block Forge
+did not put in an accordion is put in one -- and the last section arranges them,
+kept in each browser. Default on, because it was asked for; off puts Forge's
+column back as it was found, on the page, without a reload.
+"""
+
 OPT_QUIET_NIGHT = "model_chain_quiet_night"
 """Draw the dark theme's primary buttons as a dim surface rather than a solid
 block of the accent. Read by javascript/model_chain_night.js.
@@ -482,6 +497,14 @@ shared.options_templates.update(
             ).info(
                 "Removes the row of links under every tab, so a page that fits the window "
                 "stops scrolling by its height"
+            ),
+            OPT_SETTINGS_MANAGER: shared.OptionInfo(
+                True,
+                "Settings in accordions, with a Settings Manager",
+            ).info(
+                "On Txt2Img and Img2Img every block under the prompt boxes is an accordion, "
+                "and the last one, Settings Manager, reorders them and shows or hides each, "
+                "kept in each browser. Off puts Forge's column back as it was"
             ),
             OPT_QUIET_NIGHT: shared.OptionInfo(
                 True,

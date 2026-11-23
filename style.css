@@ -6442,6 +6442,14 @@
     display: none !important;
 }
 
+/* ...and the row it stands in with it, since the Literal row moved to the line
+   after that row (2026-11-23): an empty row would leave one gap more in the
+   column of prompt boxes. Keyed on the same class, so a CFG above 1 brings the
+   row back with the box. */
+[id$="_neg_prompt_row"]:has(.mc-literal-cfg-collapsed) {
+    display: none !important;
+}
+
 /* -- Voice Chat -----------------------------------------------------------
    Two surfaces and one button. Everything below uses the host's own custom
    properties for colour, exactly as the rest of this file does, so a theme
@@ -12111,8 +12119,8 @@ details.mc-lora-more[open] > summary {
    Model Chain -- the LoRA viewer
    ==========================================================================
    javascript/model_chain_lora_viewer.js: a Lora Viewer button as wide as the
-   prompt boxes, under the Negative Prompt and above the Literal row, and a
-   dialog under the tab bar on the dialog layer Mini Paint NEO's popup and
+   prompt boxes, on the line directly under the Prompt, and a dialog under the
+   tab bar on the dialog layer Mini Paint NEO's popup and
    the assistant's panel share (2000; everything the assistant draws is below
    it). Every colour is one of the page theme's variables, so it follows
    whichever theme is in use, by day and by night; the three that mean
@@ -12128,32 +12136,67 @@ details.mc-lora-more[open] > summary {
     pointer-events: none;
 }
 
-/* The button's own line. Its holder sits directly after the Negative Prompt's
-   block inside Forge's negative prompt row -- a Gradio row, which wraps -- and
-   takes the whole line, so the button is as wide as the prompt boxes above it;
-   while CFG is 1 the Negative Prompt is put away and this is the line under the
-   Prompt. The Literal row follows it (model_chain_literals.js). */
+/* The button's own line: its holder is the child after Forge's prompt row in
+   the column that holds the prompt rows, which gives every child the whole
+   width, so the button is as wide as the Prompt above it and the Negative
+   Prompt and the Literal row follow it. No flex of its own: in a column the
+   basis is a height, and a column a theme gives a height would grow it. */
 .mc-lv-launch {
     display: flex;
-    flex: 1 1 100%;
+    flex: none;
+    box-sizing: border-box;
     width: 100%;
-    min-width: 100%;
+    min-width: 0;
     margin: 0;
     padding: 0;
+}
+
+/* A page without Forge's prompt row has the holder after the Prompt's own
+   block, inside Gradio's form, where the row's scoped rule on a form's
+   children gives every child `flex: 1 1 0%` at (0,2,1): this outranks it at
+   (0,2,2) and takes the line. */
+div.form > div.mc-lv-launch {
+    flex: 1 1 100%;
+    min-width: 100%;
 }
 
 .mc-lv-launch[hidden] {
     display: none !important;
 }
 
+/* A button to look at, the width of the line: Gradio draws its own buttons
+   with rules scoped to the buttons it builds, so one built here wears the same
+   variables itself -- the secondary surface, its line and radius -- or it is
+   bare text across the column. */
 .mc-lv-launch > .mc-lv-open {
     display: inline-flex;
     flex: 1 1 auto;
+    box-sizing: border-box;
     align-items: center;
     justify-content: center;
     gap: 8px;
     width: 100%;
     min-height: 40px;
+    margin: 0;
+    padding: 6px 12px;
+    border: var(--button-border-width, 1px) solid var(--button-secondary-border-color, var(--border-color-primary));
+    border-radius: var(--button-large-radius, var(--radius-lg));
+    background: var(--button-secondary-background-fill, var(--background-fill-secondary));
+    color: var(--button-secondary-text-color, var(--body-text-color));
+    font: inherit;
+    font-weight: var(--button-large-text-weight, 600);
+    cursor: pointer;
+}
+
+.mc-lv-launch > .mc-lv-open:hover {
+    background: var(--button-secondary-background-fill-hover, var(--background-fill-secondary));
+    border-color: var(--button-secondary-border-color-hover, var(--border-color-primary));
+    color: var(--button-secondary-text-color-hover, var(--body-text-color));
+}
+
+.mc-lv-launch > .mc-lv-open:focus-visible {
+    outline: 2px solid var(--color-accent, var(--border-color-accent));
+    outline-offset: 2px;
 }
 
 .mc-lv-open-label {
@@ -13019,6 +13062,239 @@ details.mc-lora-more[open] > summary {
     .mc-lv-bubble {
         transition: none;
     }
+}
+
+/* ==========================================================================
+   Model Chain -- the settings as accordions, and the Settings Manager
+   ==========================================================================
+   javascript/model_chain_settings_manager.js: on Txt2Img and Img2Img every
+   block under the prompt boxes is an item in one list (.mc-sm-list), a block
+   Forge did not put in an accordion inside an accordion of the script's, and
+   the last item arranges the others. The accordions wear the classes of one
+   of Gradio's on the page, so the rules that draw Gradio's draw these; what is
+   here is the list, the manager's rows, and an accordion's look for a page
+   with none to read (.mc-sm-own). Every colour is one of the page theme's
+   variables. Every `display` below would beat the browser's rule for
+   [hidden], so the section says what [hidden] means for its own nodes. */
+
+/* One column of items with the settings column's own gap between them; the
+   theme boxes the column's direct children, and the list is not a box. */
+.mc-sm-list {
+    display: flex;
+    flex-direction: column;
+    gap: inherit;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+}
+
+.mc-sm-item {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+/* Hidden by the manager, or nothing in it to draw (Override Settings until a
+   paste fills it, Img2Img's inpaint controls off the Inpaint tab), and a
+   container Forge built whose blocks are all in the list now. */
+.mc-sm-item[hidden],
+.mc-sm-item[data-mc-sm-empty],
+.mc-sm-emptied {
+    display: none !important;
+}
+
+/* An accordion's body: Gradio's column when the page lent its classes, and
+   the same when it did not. */
+.mc-sm-acc > .mc-sm-body > .mc-sm-inner {
+    display: flex;
+    flex-direction: column;
+    gap: var(--layout-gap, 12px);
+    min-width: 0;
+}
+
+.mc-sm-acc > .mc-sm-body > .mc-sm-inner > * {
+    min-width: 0;
+}
+
+/* A page with no accordion of Gradio's to read: one drawn from the theme's
+   block variables, as Gradio draws its own. */
+.mc-sm-acc.mc-sm-own {
+    box-sizing: border-box;
+    padding: var(--block-padding, 8px);
+    border: var(--block-border-width, 1px) solid var(--block-border-color, var(--border-color-primary));
+    border-radius: var(--block-radius, 8px);
+    background: var(--block-background-fill);
+}
+
+.mc-sm-own > .label-wrap {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--body-text-color);
+    font: inherit;
+    font-weight: var(--section-header-text-weight, 400);
+    font-size: var(--section-header-text-size, inherit);
+    text-align: left;
+    cursor: pointer;
+}
+
+.mc-sm-own > .label-wrap.open {
+    margin-bottom: var(--size-2, 8px);
+}
+
+.mc-sm-own > .label-wrap > .icon {
+    transition: transform 150ms;
+}
+
+/* -- the Settings Manager ---------------------------------------------------- */
+
+/* Buttons here are named through their row or the foot: Gradio's own reset
+   (`.gradio-container-4-40-0 button { padding: 0 }`, 0,1,1) outranks a lone
+   class. */
+.mc-sm-manager {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.mc-sm-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+/* A row a finger can work: at least 40 px, a grip to drag, the name, up, down
+   and the eye, each button 36 px. A long name wraps rather than hiding its
+   end on a phone. */
+.mc-sm-rows > .mc-sm-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    box-sizing: border-box;
+    min-height: 40px;
+    min-width: 0;
+    margin: 0;
+    padding: 1px 4px 1px 0;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-lg, 8px);
+    background: var(--background-fill-secondary);
+    color: var(--body-text-color);
+}
+
+.mc-sm-rows > .mc-sm-row.mc-sm-dragging {
+    position: relative;
+    z-index: 1;
+    border-color: var(--color-accent, var(--border-color-accent));
+    box-shadow: var(--shadow-drop-lg, none);
+}
+
+.mc-sm-row > .mc-sm-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 4px 0;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+/* Hidden: struck through and quiet. Nothing to draw now: quiet. */
+.mc-sm-row.mc-sm-off > .mc-sm-name {
+    color: var(--body-text-color-subdued);
+    text-decoration: line-through;
+}
+
+.mc-sm-row.mc-sm-idle > .mc-sm-name {
+    color: var(--body-text-color-subdued);
+}
+
+.mc-sm-row > .mc-sm-button {
+    display: inline-grid;
+    flex: none;
+    place-items: center;
+    box-sizing: border-box;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    margin: 0;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--button-small-radius, 6px);
+    background: none;
+    color: var(--body-text-color);
+    cursor: pointer;
+}
+
+.mc-sm-row > .mc-sm-button:hover:not(:disabled) {
+    background: var(--button-secondary-background-fill-hover, var(--background-fill-primary));
+    border-color: var(--border-color-primary);
+}
+
+.mc-sm-row > .mc-sm-button:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.mc-sm-row > .mc-sm-button:focus-visible,
+.mc-sm-foot > .mc-sm-reset:focus-visible {
+    outline: 2px solid var(--color-accent, var(--border-color-accent));
+    outline-offset: 1px;
+}
+
+/* The grip is the drag's: a finger on it moves the row, not the page. */
+.mc-sm-row > .mc-sm-grip {
+    cursor: grab;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.mc-sm-row.mc-sm-dragging > .mc-sm-grip {
+    cursor: grabbing;
+}
+
+.mc-sm-row > .mc-sm-eye[aria-pressed="false"] {
+    color: var(--body-text-color-subdued);
+}
+
+.mc-sm-icon {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    pointer-events: none;
+}
+
+.mc-sm-foot {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.mc-sm-foot > .mc-sm-reset {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    box-sizing: border-box;
+    min-height: 36px;
+    margin: 0;
+    padding: 4px 12px;
+    border: var(--button-border-width, 1px) solid var(--button-secondary-border-color, var(--border-color-primary));
+    border-radius: var(--button-large-radius, var(--radius-lg));
+    background: var(--button-secondary-background-fill, var(--background-fill-secondary));
+    color: var(--button-secondary-text-color, var(--body-text-color));
+    font: inherit;
+    cursor: pointer;
+}
+
+.mc-sm-foot > .mc-sm-reset:hover {
+    background: var(--button-secondary-background-fill-hover, var(--background-fill-secondary));
 }
 
 /* ==========================================================================

@@ -77,6 +77,22 @@ FORGE_CSS = """
 :root, .dark { --block-background-fill: transparent; }
 """
 
+# Gradio 4.40's Row and Column (Row.svelte, Column.svelte), at their own
+# selectors' weight on a real page (`div.svelte-sa48pu > *, div.svelte-sa48pu >
+# .form > *`, read in Chromium off Forge Neo's prompt rows): a row's rule
+# reaches the children of the form Gradio wraps its components in, at
+# (0,2,1), and gives each `flex: 1 1 0%`; a column gives each child the whole
+# width. The first button stood in that form, and a page without this rule
+# said it took the line while the user's page showed it beside the Negative
+# Prompt (2026-11-23).
+GRADIO_LAYOUT_CSS = """
+div.gr-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; position: relative; }
+div.gr-row > *, div.gr-row > .form > * { flex: 1 1 0%; min-width: min(160px, 100%); }
+div.gr-form { display: flex; flex-direction: inherit; flex-wrap: wrap; gap: 0; }
+div.gr-col { display: flex; flex-direction: column; gap: 8px; position: relative; }
+div.gr-col > *, div.gr-col > .form > * { width: 100%; }
+"""
+
 HOST_CSS = """
 :root { --background-fill-primary: #000; --border-color-primary: #262626;
         --body-text-color: #e6e6e6; --body-text-color-subdued: #8c8c8c; --input-background-fill: #161616;
@@ -176,11 +192,19 @@ def editor_html(tab: str) -> str:
             f'<button class="save" onclick="closePopup()">Save</button></div>')
 
 
-def page_html(theme_css: str = "", cfg_one: bool = False, literals_script: bool = False) -> str:
+def page_html(theme_css: str = "", cfg_one: bool = False, literals_script: bool = False,
+              prompt_rows: bool = True) -> str:
     """The page. ``cfg_one`` is the Negative Prompt put away as the Literal
     script puts it away at CFG 1; ``literals_script`` loads that script as well,
-    with the Literal row where Gradio built it, for the two scripts' placement
-    together."""
+    with the Literal row where Gradio built it -- in the Image Pipeline's
+    accordion, far down the column -- for the two scripts' placement together;
+    without it the row is where that script puts it. ``prompt_rows`` False is a
+    page whose theme took Forge's prompt rows away, with the two prompt blocks
+    in one row's form.
+
+    The prompt boxes are in Forge Neo's nesting (``ui_toprow.create_prompts``):
+    a column holding a row per prompt, each prompt's block in the form Gradio
+    wraps it in."""
     tools = """
         <button id="{p}paste" class="lg secondary gradio-button tool svelte-cmf5ev">&#x2199;&#xfe0f;</button>
         <button id="{tab}_clear_prompt" class="lg secondary gradio-button tool svelte-cmf5ev">&#x1f5d1;&#xfe0f;</button>
@@ -190,9 +214,42 @@ def page_html(theme_css: str = "", cfg_one: bool = False, literals_script: bool 
     NEGATIVE_CLASS = " mc-literal-cfg-collapsed" if cfg_one else ""
     literal_tag = ('<script src="/javascript/model_chain_literals.js"></script>'
                    if literals_script else "")
+    literal_row = f"""
+        <div id="mc-krea-creative-literal-row" class="column gr-col mc-literal-row">
+          <div class="form gr-form"><div id="mc-krea-creative-literal-positive" class="block"><textarea>{LITERAL_POSITIVE}</textarea></div>
+          <div id="mc-krea-creative-literal-negative" class="block"><textarea>{LITERAL_NEGATIVE}</textarea></div></div>
+        </div>"""
+
+    def prompt_area(tab, prompt, literal=""):
+        negative_class = NEGATIVE_CLASS if tab == "txt2img" else ""
+        negative_text = "blurry" if tab == "txt2img" else ""
+        if not prompt_rows:
+            return f"""
+    <div id="{tab}_prompt_container" class="column gr-col">
+      <div class="row gr-row"><div class="form gr-form">
+        <div id="{tab}_prompt" class="block"><textarea>{prompt}</textarea></div>
+        <div id="{tab}_neg_prompt" class="block{negative_class}"><textarea>{negative_text}</textarea></div>
+      </div></div>{literal}
+    </div>"""
+        return f"""
+    <div id="{tab}_prompt_container" class="column gr-col">
+      <div id="{tab}_prompt_row" class="row prompt-row gr-row">
+        <div class="form gr-form"><div id="{tab}_prompt" class="block"><textarea>{prompt}</textarea></div></div>
+      </div>
+      <div id="{tab}_neg_prompt_row" class="row prompt-row gr-row">
+        <div class="form gr-form"><div id="{tab}_neg_prompt" class="block{negative_class}"><textarea>{negative_text}</textarea></div></div>
+      </div>{literal}
+    </div>"""
+
+    txt2img_prompts = prompt_area("txt2img", PROMPT, "" if literals_script else literal_row)
+    pipeline = (f"""
+    <div id="txt2img_script_container" class="column gr-col">
+      <div class="block gradio-accordion"><button class="label-wrap">Image Pipeline</button>
+        <div>{literal_row}</div></div>
+    </div>""" if literals_script else "")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>{HOST_CSS}{FORGE_CSS}{FORGE_POPUP_CSS}{theme_css}</style>
+<style>{HOST_CSS}{GRADIO_LAYOUT_CSS}{FORGE_CSS}{FORGE_POPUP_CSS}{theme_css}</style>
 <link rel="stylesheet" href="/style.css">
 </head><body class="dark">
 <script>
@@ -230,31 +287,11 @@ document.addEventListener("minipaint:overlay", (e) => window.overlays.push(e.det
 {editor_html("txt2img")}{editor_html("img2img")}
 <div id="tabs" class="tabs">
   <div class="tab-nav"><button id="nav-txt2img">Txt2img</button><button id="nav-img2img">Img2img</button></div>
-  <div id="tab_txt2img" class="tabitem">
-    <div id="txt2img_prompt_container" class="column">
-      <div id="txt2img_prompt_row" class="row prompt-row">
-        <div id="txt2img_prompt" class="block"><textarea>{PROMPT}</textarea></div>
-      </div>
-      <div id="txt2img_neg_prompt_row" class="row prompt-row">
-        <div id="txt2img_neg_prompt" class="block{NEGATIVE_CLASS}"><textarea>blurry</textarea></div>
-        <div id="mc-krea-creative-literal-row" class="row">
-          <div id="mc-krea-creative-literal-positive" class="block"><textarea>{LITERAL_POSITIVE}</textarea></div>
-          <div id="mc-krea-creative-literal-negative" class="block"><textarea>{LITERAL_NEGATIVE}</textarea></div>
-        </div>
-      </div>
-    </div>
-    <div id="txt2img_tools" class="row">{tools.format(p="", tab="txt2img")}</div>
+  <div id="tab_txt2img" class="tabitem">{txt2img_prompts}
+    <div id="txt2img_tools" class="row">{tools.format(p="", tab="txt2img")}</div>{pipeline}
     <div class="spacer"></div>
   </div>
-  <div id="tab_img2img" class="tabitem" style="display: none;">
-    <div id="img2img_prompt_container" class="column">
-      <div id="img2img_prompt_row" class="row prompt-row">
-        <div id="img2img_prompt" class="block"><textarea>{IMG2IMG_PROMPT}</textarea></div>
-      </div>
-      <div id="img2img_neg_prompt_row" class="row prompt-row">
-        <div id="img2img_neg_prompt" class="block"><textarea></textarea></div>
-      </div>
-    </div>
+  <div id="tab_img2img" class="tabitem" style="display: none;">{prompt_area("img2img", IMG2IMG_PROMPT)}
     <div id="img2img_tools" class="row">{tools.format(p="i2i_", tab="img2img")}</div>
   </div>
 </div>
@@ -349,12 +386,13 @@ class Served:
 
 
 def open_page(browser, width=900, height=800, theme_css="", clock=False, touch=False,
-              cfg_one=False, literals_script=False):
+              cfg_one=False, literals_script=False, prompt_rows=True):
     context = browser.new_context(viewport={"width": width, "height": height}, has_touch=touch)
     page = context.new_page()
     if clock:
         page.clock.install()
-    served = Served(page_html(theme_css, cfg_one=cfg_one, literals_script=literals_script))
+    served = Served(page_html(theme_css, cfg_one=cfg_one, literals_script=literals_script,
+                              prompt_rows=prompt_rows))
     page.route(ORIGIN + "/**", served)
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!window.mcLoraViewer")
@@ -438,55 +476,110 @@ BUTTON_PLACE = """(tab) => {
         inTools: !!document.querySelector('#' + tab + '_tools .mc-lv-open'),
         width: Math.round(own.width), promptWidth: Math.round(box(tab + '_prompt').width),
         left: Math.round(own.left), promptLeft: Math.round(box(tab + '_prompt').left),
-        top: Math.round(own.top), promptBottom: Math.round(box(tab + '_prompt').bottom),
-        negativeBottom: Math.round(box(tab + '_neg_prompt').bottom),
+        top: Math.round(own.top), bottom: Math.round(own.bottom),
+        promptBottom: Math.round(box(tab + '_prompt').bottom),
+        negativeTop: Math.round(box(tab + '_neg_prompt').top),
+        height: Math.round(own.height),
     };
 }"""
 
 
 class TestTheButton:
-    """"a button that is named "Lora Viewer" and it should appear below the
-    negative prompt box in the image generation tab. Make it as wide as the
-    prompt input fields and just below negative (or positive when CFG = 1), and
-    above the literals" (2026-11-06)."""
+    """"I want it to appear as a single row button that is wide as the column,
+    just like positive prompt. It should appear below positive prompt,
+    everything else goes below it. It should stick to just below the positive
+    prompt" (2026-11-23; until then it was below the Negative Prompt, at the
+    user's word of 2026-11-06, and on a real page beside it)."""
 
-    def test_one_lora_viewer_button_under_the_negative_prompt_as_wide_as_the_boxes(self, browser):
+    def test_one_lora_viewer_button_on_the_line_under_the_prompt_as_wide_as_it(self, browser):
         page, served = open_page(browser)
         try:
-            for tab, before in (("txt2img", "mc-krea-creative-literal-row"), ("img2img", None)):
+            for tab in ("txt2img", "img2img"):
                 found = page.evaluate(BUTTON_PLACE, tab)
-                assert found["after"] == tab + "_neg_prompt", found
-                assert found["before"] == before, found
+                assert found["after"] == tab + "_prompt_row", found
+                assert found["before"] == tab + "_neg_prompt_row", found
                 assert found["text"] == "Lora Viewer" and found["svg"], found
                 assert found["count"] == 1 and not found["inTools"], found
                 assert abs(found["width"] - found["promptWidth"]) <= 1, found
                 assert abs(found["left"] - found["promptLeft"]) <= 1, found
-                assert found["top"] >= found["negativeBottom"], found
+                assert 0 <= found["top"] - found["promptBottom"] <= 20, found
+                assert found["bottom"] <= found["negativeTop"], found
+                assert 36 <= found["height"] <= 48, found
         finally:
             close_page(page, served)
 
-    def test_at_cfg_one_it_is_the_line_under_the_prompt(self, browser):
-        """The Literal script puts the Negative Prompt away while CFG is 1."""
+    def test_it_is_a_button_to_look_at_not_bare_text(self, browser):
+        """Gradio draws its buttons with rules scoped to the ones it builds, so
+        this one wears the secondary surface's variables itself."""
+        page, served = open_page(browser)
+        try:
+            look = page.evaluate("""() => {
+                const style = getComputedStyle(document.getElementById('mc-lora-viewer-txt2img'));
+                return {background: style.backgroundColor, border: style.borderTopWidth,
+                        borderStyle: style.borderTopStyle};
+            }""")
+            assert look["background"] == "rgb(26, 26, 26)", look
+            assert look["border"] != "0px" and look["borderStyle"] == "solid", look
+        finally:
+            close_page(page, served)
+
+    def test_at_cfg_one_it_is_still_the_line_under_the_prompt(self, browser):
+        """The Literal script puts the Negative Prompt away while CFG is 1, and
+        its row with it: the Literal row is then the line under the button."""
         page, served = open_page(browser, cfg_one=True)
         try:
             found = page.evaluate(BUTTON_PLACE, "txt2img")
-            assert found["after"] == "txt2img_neg_prompt", found
+            assert found["after"] == "txt2img_prompt_row", found
             assert 0 <= found["top"] - found["promptBottom"] <= 20, found
             assert abs(found["width"] - found["promptWidth"]) <= 1, found
+            gap = page.evaluate("""() => {
+                const row = document.getElementById('txt2img_neg_prompt_row');
+                const literal = document.getElementById('mc-krea-creative-literal-row');
+                const button = document.getElementById('mc-lora-viewer-launch-txt2img');
+                return {rowShown: getComputedStyle(row).display !== 'none',
+                        gap: Math.round(literal.getBoundingClientRect().top
+                                        - button.getBoundingClientRect().bottom)};
+            }""")
+            assert gap["rowShown"] is False and 0 <= gap["gap"] <= 20, gap
         finally:
             close_page(page, served)
 
-    def test_with_the_literal_script_the_row_follows_it_and_neither_moves_again(self, browser):
-        """Both scripts place their element after the Negative Prompt on every
-        update. Anchored on it alone, each would move its element back in front
-        of the other's on the next update -- so an odd number of updates is what
-        shows a to-and-fro."""
-        page, served = open_page(browser, literals_script=True)
+    def test_without_forges_prompt_row_it_still_takes_the_line_in_the_form(self, browser):
+        """A theme that rebuilt the prompt area: the button follows the Prompt's
+        own block, inside Gradio's form, and outranks the row's rule there."""
+        page, served = open_page(browser, prompt_rows=False)
         try:
-            order = page.evaluate("""() => Array.from(
-                document.getElementById('txt2img_neg_prompt_row').children).map((el) => el.id)""")
-            assert order == ["txt2img_neg_prompt", "mc-lora-viewer-launch-txt2img",
-                             "mc-krea-creative-literal-row"], order
+            found = page.evaluate(BUTTON_PLACE, "txt2img")
+            assert found["after"] == "txt2img_prompt", found
+            assert found["before"] == "txt2img_neg_prompt", found
+            assert abs(found["width"] - found["promptWidth"]) <= 1, found
+            assert 0 <= found["top"] - found["promptBottom"] <= 20, found
+        finally:
+            close_page(page, served)
+
+    def test_with_the_literal_script_the_rows_take_their_lines_and_nothing_moves_again(
+            self, browser):
+        """Both scripts place their element on every update, the button after
+        the Prompt's row and the Literal row after the Negative Prompt's, each
+        on a line of its own: the Literal boxes no longer stand beside the
+        Negative Prompt on a wide window. An odd number of updates is what
+        shows a to-and-fro."""
+        page, served = open_page(browser, width=1400, literals_script=True)
+        try:
+            found = page.evaluate("""() => {
+                const box = (id) => document.getElementById(id).getBoundingClientRect();
+                return {order: Array.from(document.getElementById('txt2img_prompt_container').children)
+                                .map((el) => el.id),
+                        negative: [Math.round(box('txt2img_neg_prompt').width),
+                                   Math.round(box('txt2img_neg_prompt').bottom)],
+                        literal: [Math.round(box('mc-krea-creative-literal-positive').width),
+                                  Math.round(box('mc-krea-creative-literal-positive').top)],
+                        prompt: Math.round(box('txt2img_prompt').width)};
+            }""")
+            assert found["order"] == ["txt2img_prompt_row", "mc-lora-viewer-launch-txt2img",
+                                      "txt2img_neg_prompt_row", "mc-krea-creative-literal-row"], found
+            assert found["negative"][0] == found["prompt"] == found["literal"][0], found
+            assert found["literal"][1] >= found["negative"][1], found
             changed = page.evaluate("""() => new Promise((resolve) => {
                 let records = 0;
                 const watch = new MutationObserver((list) => { records += list.length; });

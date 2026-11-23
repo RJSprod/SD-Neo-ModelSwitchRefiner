@@ -423,6 +423,39 @@ listener, and a browser sends no click after a cancelled press -- and the
 duplicates were taken out, after which the one guard left fails its test.
 Not run on the user's machine or in a Gecko build.
 
+### 8.8 The button on the line under the Prompt (2026-11-23)
+
+> "the "lora viewer" is not appear the way i want. You can see in both narrow
+> and wide view, it takes a lot of space. My idea, i want it to appear as a
+> single row button that is wide as the column, just like positive prompt. It
+> should appear below positive prompt, everything else goes below it."
+
+**What was so.** The holder was put directly after the Negative Prompt's block
+-- inside the form Gradio wraps that block in, inside Forge's negative prompt
+row -- and took "the whole line" by `.mc-lv-launch { flex: 1 1 100% }`. On a
+real page Gradio's row rule on its form's children (`div.svelte-sa48pu > .form >
+*`, 0,2,1: `flex: 1 1 0%; min-width: min(160px, 100%)`) outranks that, so the
+button stood beside the Negative Prompt at half the width, and on a wide window
+the Literal row beside both. The test page had no form wrapper and no such
+rule, so every placement test passed (measured in Chromium on Gradio 4.40 with
+Forge Neo's own prompt rows, `ui_toprow.create_prompts`, and its stylesheet).
+
+| Question | Decision |
+|---|---|
+| Where | The child after `#<tab>_prompt_row` in the column that holds the prompt rows (`#<tab>_prompt_container`, or the Prompts accordion's column under that prompt-box style), on both tabs: Gradio's column gives every child the whole width (`div.svelte-… > * { width: 100% }`). Nothing else is between it and the Prompt |
+| The rest | The Negative Prompt's row follows it, then the Literal row, which `model_chain_literals.js` now puts on the line after the Negative Prompt's row (docs/11 §11); at CFG 1 that row is put away with the box, and the Literal row is the line under the button |
+| Its look | A button to look at: Gradio draws its own buttons with rules scoped to the buttons it builds, so this one wears the secondary surface's variables itself (background, line, radius, hover), 40 px tall |
+| A page without Forge's prompt row | After the Prompt's own block, in its form, where `div.form > .mc-lv-launch` (0,2,1, later in the page) takes the line |
+| The mark | `data-mc-under-negative` and the Literal script's reading of it are gone: nothing stands between the Negative Prompt and the Literal row any more |
+
+Tests: `tests/test_lora_viewer_js.py`'s page now builds the prompt boxes in
+Forge Neo's nesting with Gradio's row, form and column rules at their real
+weight (`GRADIO_LAYOUT_CSS`); `TestTheButton` holds the line under the Prompt
+on both tabs, the button's surface, CFG 1 (the empty row put away), a page
+without the prompt row, and the order of the four lines with the Literal
+script loaded, at 1400 px. `tests/test_literals_js.py` holds the row's anchor.
+Five mutations, each failing a test.
+
 ---
 
 ## 9. Each LoRA's first image (2026-11-14)

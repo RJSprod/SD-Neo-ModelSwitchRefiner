@@ -477,3 +477,14 @@ there, because Forge offers no way to build it there. The failure mode is
 benign and tested, but it is a DOM move and this repository is otherwise
 careful not to make those — worth knowing about before someone reports the row
 in the wrong place under an unusual theme.
+
+Since 2026-11-23 the row goes on the line *after* the Negative Prompt's row
+(`#txt2img_neg_prompt_row`), in the column that holds the prompt rows, and no
+longer inside that row after the Negative Prompt's own block. Inside the row it
+stood in Gradio's form, whose row rule (`div.svelte-… > .form > *`, 0,2,1) gives
+every child `flex: 1 1 0%`, so on a wide window the Literal boxes stood *beside*
+the Negative Prompt -- the user's screenshot, measured again on Gradio 4.40 with
+Forge Neo's prompt rows. While CFG is 1 the Negative Prompt's row is put away
+with its box (`[id$="_neg_prompt_row"]:has(.mc-literal-cfg-collapsed)`), so no
+empty row leaves a gap. A page without that row (a theme that rebuilt the prompt
+area) keeps the old anchor, the Negative Prompt's block.

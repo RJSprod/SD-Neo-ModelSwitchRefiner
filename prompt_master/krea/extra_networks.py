@@ -73,6 +73,9 @@ that happens to look like it, and silently lift a piece of somebody's prompt out
 of the text the writer was meant to rewrite.
 """
 
+LINE = "\n"
+"""What :func:`last` puts between the words and each tag after them."""
+
 _TAG = re.compile(r"<(?:%s):[^<>]*>" % "|".join(KINDS), re.IGNORECASE)
 """One tag. ``[^<>]*`` because a payload may hold colons, spaces and slashes --
 a name, a weight, a second weight, an extension's own suffix -- and may not hold
@@ -131,22 +134,30 @@ def protect(text) -> str:
 
 
 def last(text) -> str:
-    """``text`` with every extra-network tag moved to its end, in the order they had.
+    """``text`` with every extra-network tag after its words, one tag a line.
 
-    For an image's *saved* prompt, and only that: the ``Prompt:`` line Forge
-    writes is the finished string :func:`protect` and the literal restore built,
-    with every tag in front, and the user reads it back in PNG Info wanting the
-    tags after the words (``mc_saved_prompt``). What it changes is where the
-    tags sit in that text, never what a paste of it generates: pasting either
-    form back, :func:`protect` lifts the same tags in the same order and the
-    parse tidies the same words, so Stage 1 is given the same string from both.
-    The words are tidied the way the parse tidies them, which is what keeps that
-    true; ``tests/test_saved_prompt.py`` holds it over a spread of prompts.
+    The words first, then each tag on a line of its own, in the order they
+    had::
 
-    Returns the source string itself when there is nothing to move, and also
-    when moving could change what a paste generates: a line that still holds
-    ``[[`` (its commands would be read in a new order) and one with a tag right
-    after a ``+`` or ``-`` (pasted, that tag is read as a placed command).
+        "<lora:a:0.8> <lora:b:1> a woman, red coat"
+            -> "a woman, red coat\n<lora:a:0.8>\n<lora:b:1>"
+
+    For the prompt an image saves and the prompt a recalled image puts back in
+    the box (``mc_saved_prompt``), on every model and both tabs: the user reads
+    an image back wanting the tags after the words (2026-11-03), and each on
+    its own line, "so its very clean" (2026-11-23). What it changes is where
+    the tags sit in that text, never what a paste of it generates on Txt2Img:
+    pasting either form back, :func:`protect` lifts the same tags in the same
+    order and the parse tidies the same words, so Stage 1 is given the same
+    string from both. The words are tidied the way the parse tidies them, which
+    is what keeps that true; ``tests/test_saved_prompt.py`` holds it over a
+    spread of prompts.
+
+    Returns the source string itself when there are no tags, and also when
+    moving could change what a paste generates: a line that still holds ``[[``
+    (its commands would be read in a new order) and one with a tag right after
+    a ``+`` or ``-`` (pasted, that tag is read as a placed command). A text
+    already in this shape comes back equal to itself.
     """
     source = str(text or "")
     tags = [match.group(0) for match in _TAG.finditer(source)]
@@ -156,7 +167,7 @@ def last(text) -> str:
         if match.start() > 0 and source[match.start() - 1] in literals._SIGNS:
             return source
     body = literals._tidy(_TAG.sub("", source))
-    return literals.join([body, *tags])
+    return literals.join([body, *tags], LINE)
 
 
 def count(text) -> int:

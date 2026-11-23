@@ -613,8 +613,10 @@ chained job** (default on, [Progress and ETA](#progress-and-eta)), **Advance
 the progress bar smoothly** ([Smooth advance](#smooth-advance)), and the
 appearance settings ([Progress-bar appearance](#progress-bar-appearance)).
 
-**Model Chain: Page** — **Hide the WebUI footer** (default on) and **Quieter
-night mode** (default on, [A quieter night mode](#a-quieter-night-mode)).
+**Model Chain: Page** — **Hide the WebUI footer** (default on), **Settings in
+accordions, with a Settings Manager** (default on, [Settings in accordions, and
+the Settings Manager](#settings-in-accordions-and-the-settings-manager)) and
+**Quieter night mode** (default on, [A quieter night mode](#a-quieter-night-mode)).
 
 **Model Chain: LLM Studio** — the tab, the vision projector, the prompt caches,
 VRAM residency and the persistent LLM budget, WanGP's card, the roles, the
@@ -2000,41 +2002,49 @@ Values containing commas, colons or newlines are quoted by the host's own
 `infotext_utils.quote()` and unquoted on parse, which is what keeps
 `<lora:name:weight>` tags intact across the round trip.
 
-**LoRA tags are saved at the end of the prompt.** On Txt2Img every LoRA tag in
-the prompt and the two Literal boxes reaches Forge *in front of* the finished
-prompt (see *Literal prompts* below), and the `Prompt:` line Forge saves is that
-string, so every image used to read back in PNG Info with its LoRAs first. Since
-2026-11-03 the saved text has them at the end, after the words, in the order
-they had; `<lyco:…>` and `<hypernet:…>` tags move the same way:
+**LoRA tags are saved at the end of the prompt, one a line.** On Txt2Img
+every LoRA tag in the prompt and the two Literal boxes reaches Forge *in front
+of* the finished prompt (see *Literal prompts* below), and the `Prompt:` line
+Forge saves is that string, so every image used to read back in PNG Info with
+its LoRAs first. Since 2026-11-03 the saved text has them after the words, and
+since 2026-11-23 each on a line of its own, in the order they had, on every
+model and both tabs; `<lyco:…>` and `<hypernet:…>` tags move the same way:
 
 ```
 Forge is given:   <lora:realfilter:0.85> <lora:detail:-0.5> portrait of a woman, blue hat
-the image saves:  portrait of a woman, blue hat <lora:realfilter:0.85> <lora:detail:-0.5>
+the image saves:  portrait of a woman, blue hat
+                  <lora:realfilter:0.85>
+                  <lora:detail:-0.5>
 ```
 
 Only the saved text changes (`mc_saved_prompt` wraps Forge's
 `processing.create_infotext` and rewrites the head of what it returns). The
 picture is made from the prompt Forge was given, exactly as before, and a paste
 of the saved text on Txt2Img gives Forge the same prompt as a paste of the old
-order did, because the tags are moved in front again before Forge reads it. The
-PNG's text, the text under the gallery, `params.txt` (what Forge's paste button
-reads when the prompt box is empty), a grid's text and a chained image's text
-all carry the new order; `Krea Source Prompt` and the two Literal keys stay as
-you typed them. Img2Img has nothing that moves its tags, so they stay where you
-typed them. A saved line that still holds a `[[` command, or a tag right after a
-`+` or `-`, is left as it is, because pasted back those would be read in a
-different order.
+order did, because the tags are moved in front again before Forge reads it.
+Forge reads a prompt over several lines, so the tags on their own lines come
+back as part of the prompt. The PNG's text, the text under the gallery,
+`params.txt` (what Forge's paste button reads when the prompt box is empty), a
+grid's text and a chained image's text all carry the new order; `Krea Source
+Prompt` and the two Literal keys stay as you typed them. A saved line that
+still holds a `[[` command, or a tag right after a `+` or `-`, is left as it
+is, because pasted back those would be read in a different order. The negative
+prompt is left as it was written.
 
 **And they come back at the end when you recall an image.** PNG Info's *Send to
 txt2img* / *Send to img2img*, a gallery's Send to that reads the image's own
 text, and the paste button all go through Forge's paste, which hands the parsed
 parameters to this extension before it fills a field (`on_infotext_pasted`).
-An image saved before 2026-11-03 — tags in front — is recalled with them after
-the words, in the order they had, the same move the saved text gets. On
-Txt2Img this changes nothing that is generated: the tags are lifted to the
-front again before Forge reads the prompt. Only an image whose own text says
-this extension lifted its tags (`Krea Literal Command Count`) is changed; an
-Img2Img image's or another tool's tags stay where they were typed.
+Every recalled prompt comes back as the words, then each LoRA tag on its own
+line — whatever made the image: one saved before 2026-11-03 with its tags in
+front, an Img2Img image, another tool's, any model (Krea 2, MOSS-Image, SDXL,
+…; until 2026-11-23 only an image whose text carried this extension's
+`Krea Literal Command Count` was changed). On Txt2Img this changes nothing that
+is generated: the tags are lifted to the front again before Forge reads the
+prompt. On Img2Img nothing lifts them, so Forge takes them out where they now
+stand: the words are the same, and what differs is only what their removal
+leaves — a stray comma or space between the words, which the move tidies away,
+and line breaks at the end of the prompt instead of spaces at its start.
 
 ### Why a switch is slow, and what to check
 
@@ -8394,11 +8404,13 @@ when the UI Preset changes** (on).
 ## LoRA Viewer
 
 Every LoRA in the prompt, with its picture, its trigger words and a slider for
-its weight, behind one button named **Lora Viewer**, as wide as the prompt boxes,
-directly under the Negative Prompt on Txt2Img and Img2Img — under the Prompt
-while CFG is 1 and the Negative Prompt is put away — and above the Literal row
-(since 2026-11-06: it was the upright sliders after Forge's Apply Styles, at the
-top of the tool row and out of a thumb's reach on a phone). Pressed, it covers
+its weight, behind one button named **Lora Viewer**: a row of its own as wide as
+the Prompt, on the line directly under the Prompt on Txt2Img and Img2Img, with
+the Negative Prompt and the two Literal boxes each on its own line below it
+(since 2026-11-23; from 2026-11-06 it was meant to sit under the Negative
+Prompt and on a real page stood beside it, and before that it was the upright
+sliders after Forge's Apply Styles, at the top of the tool row and out of a
+thumb's reach on a phone). Pressed, it covers
 the page under the tab bar — or beside it, when the Forge Assistant's
 *Transpose View* has put the bar down one side — (centred, and no wider than
 880 px, on a wide screen) with one thin row for each `<lora:…>` or `<lyco:…>` tag in the Prompt
@@ -8503,6 +8515,40 @@ the dialog layer Mini Paint NEO's popup and the Forge Assistant share
 which would interrupt a running generation, and the assistant's, which would
 leave focus mode.
 
+## Settings in accordions, and the Settings Manager
+
+On Txt2Img and Img2Img, everything under the prompt boxes — the Prompt, the
+Lora Viewer, the Negative Prompt and the two Literal boxes stay as they are — is
+a list of accordions (since 2026-11-23: "everything that is not prompt ... to be
+in an accordion ... and a last item ... a "Settings Manager", which would have
+options for me to rearrange or show/hide the other accordions in real time"):
+
+- **What was not an accordion is put in one**, open until you close it: Tools &
+  Styles (the compact prompt-box style's tool buttons and styles), Sampling,
+  Size & Batch (or Size and Batch, when Forge draws them apart), CFG, Seed,
+  Override Settings, Script (the Script choice and the chosen script's own
+  controls), and on Img2Img the Image (its tabs and Resize Mode), Inpaint and
+  Denoising. A block an extension draws in the column that is not an accordion
+  gets one too, named by its first label.
+- **What already was is left as it is**: Hires. fix, Refiner, and every script's
+  own accordion. Their open state is theirs — Forge's Hires. fix switches itself
+  on when its accordion opens — so nothing here opens or closes them.
+- **Settings Manager** is the last accordion: a row for every other one with a
+  grip to drag it (a finger or a mouse; the arrow keys on the grip), ↑ and ↓, and
+  an eye to show or hide it. Every change is made on the page as you press it,
+  and kept in this browser for each tab, with which accordions you closed;
+  **Reset** puts Forge's order back with everything shown and open.
+- A section with nothing to draw is not drawn — Override Settings until a paste
+  fills it, Img2Img's Inpaint off the Inpaint tab — and is drawn again the moment
+  Forge shows its controls. Its row in the manager is greyed meanwhile.
+
+The accordions are built of the classes of one of Gradio's on the page, so
+they look like Gradio's under any theme. Nothing is copied or rebuilt: Gradio's
+own blocks are moved into them, still found by their ids and still driven by
+Gradio. **Settings in accordions, with a Settings Manager** in Settings → Model
+Chain: Page, switched off, puts every block back where Forge drew it, on the
+page, without a reload; switched on again, your arrangement comes back with it.
+
 ## Layout
 
 ```
@@ -8540,9 +8586,9 @@ mc_extra_networks_folders.py     folder assignments per UI Preset and network pa
 mc_extra_networks_folders_ui.py  the editor of those assignments, on the tab
 mc_extra_networks_filter.py      the network pages narrowed to them; the folder buttons
 mc_infotext.py        infotext write + paste-field registration
-mc_saved_prompt.py    LoRA tags at the end of an image's saved prompt: Forge's
-                      create_infotext, wrapped; and of a recalled one
-                      (on_infotext_pasted)
+mc_saved_prompt.py    LoRA tags at the end of a prompt, one a line: an image's
+                      saved prompt (Forge's create_infotext, wrapped) and a
+                      recalled one (on_infotext_pasted), every model, both tabs
 mc_presets.py         named Stage 2 configurations
 mc_spatial_profiles.py     named Spatial layouts
 mc_progress.py        whole-job progress model + measured timings
@@ -8688,7 +8734,8 @@ javascript/forge_assistant_focus.js  workspace focus, as a reversible transactio
 javascript/model_chain_theme.js      the theme's page work: header, split view, drawers, info panel, icons
 javascript/model_chain_night.js      the quieter night mode's one attribute
 javascript/model_chain_lora_details.js  the LoRA dialog's chips, clipboard, cards and preset watcher
-javascript/model_chain_lora_viewer.js   the LoRA viewer: the Lora Viewer button under the prompt boxes and the dialog
+javascript/model_chain_lora_viewer.js   the LoRA viewer: the Lora Viewer button under the Prompt and the dialog
+javascript/model_chain_settings_manager.js   the settings under the prompts as accordions, and the Settings Manager
 tests/                pytest suite (runs without a WebUI)
 pytest.ini            the suite's temporary folders: kept only for failures
 tools/                maintainer scripts; never imported by the extension

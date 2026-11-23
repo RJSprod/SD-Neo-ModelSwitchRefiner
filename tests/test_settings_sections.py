@@ -80,6 +80,7 @@ class TestTheSections:
         model_chain, templates = registered
         assert section_of(templates, model_chain.OPT_HIDE_FOOTER) == model_chain.PAGE_SECTION
         assert section_of(templates, model_chain.OPT_QUIET_NIGHT) == model_chain.PAGE_SECTION
+        assert section_of(templates, model_chain.OPT_SETTINGS_MANAGER) == model_chain.PAGE_SECTION
         for key in (model_chain.OPT_SMOOTH, model_chain.OPT_STYLE_ENABLE,
                     model_chain.OPT_STYLE_THEME, model_chain.OPT_STYLE_COMPLETE):
             assert section_of(templates, key) == model_chain.PROGRESS_SECTION
