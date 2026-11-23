@@ -4956,4 +4956,9 @@ column is out of the row, and `besideOf` reads the swapped results' pixel of mar
 as beside, which they are -- a swapped tab docks, fills the row, keeps Generate where
 it was through window resizes, takes no swap from a double tap where the hidden
 divider was, and undocks swapped (`TestWithTheAssistantsDock` in
-`tests/test_columns_swap.py`).
+`tests/test_columns_swap.py`). And the swap keeps §3.45's rule: `tapOutside` records
+the tap that put the panel away (`lastTapOutside`, its point, time and frame), so a
+double click whose first click was that tap swaps nothing and lets no reset of
+Forge's run, and a touch on the divider while the panel is open (with Tap Outside to
+Close on) is kept from the swap and from Forge's divider alike
+(`TestWithTheAssistantsPanelOpen`).

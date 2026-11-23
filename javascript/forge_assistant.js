@@ -4192,6 +4192,12 @@
             const box = panel.getBoundingClientRect();
             if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return false;
         }
+        // Where and when the last tap outside put the panel away, for what
+        // reads a double click after it: the browser counts this tap as the
+        // pair's first click, and a pair whose first press only closed the
+        // panel is a closing tap and a plain one (javascript/
+        // model_chain_columns.js, on Forge's divider).
+        this.lastTapOutside = {x, y, at: Date.now(), frame: frame || null};
         this.closeFromOutside();
         return true;
     };

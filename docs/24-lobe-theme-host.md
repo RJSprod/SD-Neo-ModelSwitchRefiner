@@ -1232,7 +1232,15 @@ the page; and since nothing cancels a swapped double tap's touches, the browser
 makes mouse events of them where the finger was, on the other column after the
 swap (Chromium: mousedown, click, and a dblclick for the pair), so those are
 taken for half a second (`swallow`), and a second swap within that half second is
-the same gesture's (`SWAP_GUARD_MS`).
+the same gesture's (`SWAP_GUARD_MS`). And while the Forge Assistant's panel is
+open, a press outside it only puts it away (the user's rule, docs/22 §3.45), so a
+double tap whose first press landed then is that closing tap and one plain tap:
+neither a swap nor Forge's reset, decided from the assistant's own state -- its panel
+open with Tap Outside to Close on, read at a touch's press (`closingPress`, the touch
+and any mousedown of it kept from Forge too), and for a double click, whose first
+press the browser never hands the page once the assistant has cancelled it, the tap
+the assistant records as it puts the panel away (`lastTapOutside`: within a second
+and 16 px of the dblclick, `afterClosingTap`).
 
 **Forge's mobile script** reads a results column at `offsetLeft === 0` as a phone
 and moves Generate into it at the next resize. Gradio 4.40's row is positioned, so

@@ -8588,6 +8588,10 @@ widths back; it swaps instead now.
 - The mouse events a browser makes of a double tap land where the finger was,
   which after a swap is the other column (a picture in the gallery, a button
   among the settings): they are taken for half a second.
+- **With the Forge Assistant's panel open, the first press only closes it**, as
+  every tap outside it does: a double tap or double click on the divider whose
+  first press put the panel away is that and one plain tap — no swap, and no
+  reset of Forge's either; the next double tap swaps.
 - Nothing is moved on the page: the columns are drawn in the other order, so
   every script that finds them by their ids — Forge's, Gradio's, the Forge
   Assistant's dock, the Settings Manager — finds them as before. Forge's own

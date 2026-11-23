@@ -50,6 +50,16 @@
 //   "the settings' right edge past the results' left" for a stacked row; they
 //   ask now whether the two columns share any of the row's width.
 //
+// The Forge Assistant's panel: while it is open, a press outside it only puts
+// it away (the user's rule: "the first tap outside of an open flyout menu to do
+// nothing except close the flyout menu ... I have to tap twice to do something
+// outside"). A double tap whose first press landed while it was open is that
+// closing tap and one plain tap on the divider: neither a swap nor Forge's
+// reset. Decided from the assistant's own state, read at the press -- its
+// panel open with Tap Outside to Close on, for a touch; for a double click,
+// whose first press the browser never hands the page once the assistant has
+// cancelled it, the tap it records as it closes the panel (`lastTapOutside`).
+//
 // Touch: the window's touch listener is passive, as every listener there should
 // be, and stopping Forge's listener needs no more than `stopPropagation`; the
 // page does not pan under a finger on the divider because the stylesheet says
@@ -83,6 +93,11 @@
     // One gesture, one swap: a second swap asked for this soon after the
     // first is the same gesture's -- a browser reporting it twice.
     const SWAP_GUARD_MS = 500;
+    // A double click whose first click put the Forge Assistant's panel away:
+    // the closing tap this long before it at most -- the longest double-click
+    // time a system lets its user choose is under a second -- and this close.
+    const CLOSING_TAP_MS = 1000;
+    const CLOSING_TAP_PX = 16;
 
     const state = {lastSwap: -Infinity, tap: null, drag: null, tapWatch: null, swallowUntil: -Infinity};
 
@@ -310,6 +325,33 @@
 
     // -- the presses --------------------------------------------------------------- //
 
+    /** The Forge Assistant's shell, when its panel is on the page. */
+    function assistant() {
+        const found = window.forgeAssistant;
+        return found && found.shell && typeof found.shell === "object" ? found.shell : null;
+    }
+
+    /** Whether a press made now only puts the Forge Assistant's panel away:
+     *  its panel open, with Tap Outside to Close on. Read at the press. */
+    function closingPress() {
+        const shell = assistant();
+        const state = shell && shell.state;
+        return !!(state && state.panelOpen && state.tapToClose);
+    }
+
+    /** Whether a double click's first click was the tap that put the Forge
+     *  Assistant's panel away: the tap it recorded, at the pair's place and
+     *  within a double-click's time. */
+    function afterClosingTap(event) {
+        const shell = assistant();
+        const tap = shell && shell.lastTapOutside;
+        if (!tap || tap.frame || !(typeof tap.at === "number")) return false;
+        const since = Date.now() - tap.at;
+        return since >= 0 && since <= CLOSING_TAP_MS
+            && Math.abs(Number(event.clientX) - tap.x) <= CLOSING_TAP_PX
+            && Math.abs(Number(event.clientY) - tap.y) <= CLOSING_TAP_PX;
+    }
+
     /** After a double tap's swap the columns have moved under the finger, and
      *  the mouse events the browser makes of that touch -- a mousedown, a
      *  click, and Chromium's dblclick for the pair -- would land on whatever
@@ -335,7 +377,17 @@
     function onMouseDown(event) {
         if (swallow(event) || event.button !== 0) return;
         const found = pressed(event);
-        if (!found || !shown(found.tab)) return;
+        if (!found) return;
+        // A press that only puts the assistant's panel away does nothing
+        // else, whichever side the columns are on: no drag of this file's,
+        // and Forge's listener on the divider does not hear it either. A
+        // browser hands the page no mousedown for a press whose pointerdown
+        // the assistant cancelled; this is for one that does.
+        if (closingPress()) {
+            event.stopPropagation();
+            return;
+        }
+        if (!shown(found.tab)) return;
         // Swapped: the drag is this file's, and Forge's listener on the
         // handle never hears the press.
         event.stopPropagation();
@@ -347,9 +399,12 @@
         if (swallow(event)) return;
         const found = pressed(event);
         if (!found) return;
-        // Forge's double click put its first widths back; here it swaps.
+        // Forge's double click put its first widths back; here it swaps --
+        // unless its first click only put the assistant's panel away, when it
+        // does neither.
         event.stopPropagation();
         event.preventDefault();
+        if (afterClosingTap(event)) return;
         swap(found.tab);
     }
 
@@ -382,6 +437,16 @@
         if (!event.touches || event.touches.length !== 1) { state.tap = null; return; }
         const found = pressed(event);
         if (!found) { state.tap = null; return; }
+        if (closingPress()) {
+            // The touch that puts the assistant's panel away does nothing
+            // else: no first tap of a double tap, no drag of this file's,
+            // and Forge's listener on the divider never hears it -- no drag
+            // of Forge's left running under the assistant's touchend, no
+            // double tap of Forge's counted from it.
+            state.tap = null;
+            event.stopPropagation();
+            return;
+        }
         const touch = event.touches[0];
         const now = Date.now();
         if (isDoubleTap(state.tap, found.tab, now)) {

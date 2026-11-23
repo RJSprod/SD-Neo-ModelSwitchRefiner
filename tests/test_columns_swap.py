@@ -1089,6 +1089,164 @@ class TestWithTheAssistantsDock:
         page.close()
 
 
+class TestWithTheAssistantsPanelOpen:
+    """The user's rule for the Forge Assistant's panel: "the first tap outside
+    of an open flyout menu to do nothing except close the flyout menu ... I
+    have to tap twice to do something outside". A double click or a double
+    tap on the divider whose first press landed while the panel was open is
+    that closing tap and one plain tap: no swap, and no reset of Forge's
+    either. The next double tap, the panel closed, swaps as usual."""
+
+    @staticmethod
+    def panel_open(page) -> bool:
+        return page.evaluate("forgeAssistant.shell.state.panelOpen")
+
+    @staticmethod
+    def on_the_divider(page, x, y) -> bool:
+        return page.evaluate("([x, y]) => document.elementFromPoint(x, y).classList.contains('resize-handle')", [x, y])
+
+    def test_the_first_press_only_closes_the_panel_and_the_next_double_tap_swaps(self, browser):
+        page = open_page(browser, assistant=True, touch=True)
+        cdp = page.context.new_cdp_session(page)
+        # Widths of the user's own, so that Forge's reset would show.
+        x, y = handle_point(page, y_fraction=0)
+        mouse_drag(page, x, y, -120)
+        page.wait_for_timeout(450)
+        before = layout(page)
+        assert in_order(before) and before["template"].endswith("px 16px 1fr"), before
+        x, y = handle_point(page, y_fraction=0)
+
+        # A mouse's double click, the panel open: closed, and nothing else.
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        assert self.panel_open(page) is True and self.on_the_divider(page, x, y)
+        page.mouse.dblclick(x, y)
+        page.wait_for_timeout(300)
+        clicked = layout(page)
+        assert self.panel_open(page) is False
+        assert in_order(clicked) and clicked["attribute"] is None and clicked["kept"] is None, clicked
+        assert clicked["template"] == before["template"], "Forge's reset did not run either: " + json.dumps(clicked)
+        assert abs(clicked["settings"]["width"] - before["settings"]["width"]) <= 1, (before, clicked)
+        assert not clicked["resizing"], clicked
+
+        # A finger's double tap, the panel open again: the same, and no drag of
+        # Forge's left running from the touch that closed it.
+        page.wait_for_timeout(1100)
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        assert self.panel_open(page) is True and self.on_the_divider(page, x, y)
+        finger_tap(cdp, x, y)
+        page.wait_for_timeout(120)
+        finger_tap(cdp, x, y)
+        page.wait_for_timeout(450)
+        tapped = layout(page)
+        assert self.panel_open(page) is False
+        assert in_order(tapped) and tapped["attribute"] is None and tapped["kept"] is None, tapped
+        assert tapped["template"] == before["template"], "Forge's reset did not run either: " + json.dumps(tapped)
+        assert not tapped["resizing"], tapped
+
+        # The panel closed: the next double click swaps, as usual, and a
+        # finger's double tap puts them back.
+        page.wait_for_timeout(1100)
+        page.mouse.dblclick(x, y)
+        settle(page)
+        assert swapped(layout(page)), layout(page)
+        page.wait_for_timeout(600)
+        x, y = handle_point(page, y_fraction=0)
+        finger_tap(cdp, x, y)
+        page.wait_for_timeout(120)
+        finger_tap(cdp, x, y)
+        page.wait_for_timeout(450)
+        assert in_order(layout(page)), layout(page)
+        page.close()
+
+    def test_a_tap_elsewhere_that_closed_the_panel_leaves_the_next_double_click_its_own(self, browser):
+        """The closing tap is the pair's first click only where the pair is:
+        the panel put away by a tap on the settings, then at once a double
+        click on the divider -- both its clicks made with the panel closed --
+        swaps."""
+        page = open_page(browser, assistant=True)
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        box = page.evaluate("(() => { const r = document.getElementById('txt2img_setting_3').getBoundingClientRect();"
+                            " return [r.left + 20, r.top + r.height / 2]; })()")
+        page.mouse.click(box[0], box[1])
+        page.wait_for_timeout(100)
+        assert self.panel_open(page) is False
+        x, y = handle_point(page, y_fraction=0)
+        page.mouse.dblclick(x, y)
+        settle(page)
+        assert swapped(layout(page)), layout(page)
+        page.close()
+
+    def test_with_tap_outside_to_close_off_the_panel_stays_open_and_a_double_tap_swaps(self, browser):
+        """The assistant's own switch: off, a tap outside leaves the panel
+        open and is the page's, so the double tap is a double tap."""
+        page = open_page(browser, assistant=True, touch=True)
+        cdp = page.context.new_cdp_session(page)
+        page.evaluate("forgeAssistant.shell.setTapToClose(false); forgeAssistant.shell.open()")
+        settle(page)
+        x, y = handle_point(page, y_fraction=0)
+        assert self.on_the_divider(page, x, y)
+        page.mouse.dblclick(x, y)
+        settle(page)
+        assert self.panel_open(page) is True and swapped(layout(page))
+        page.wait_for_timeout(600)
+        x, y = handle_point(page, y_fraction=0)
+        finger_tap(cdp, x, y)
+        page.wait_for_timeout(120)
+        # The second touch swaps as it lands, before the mouse events the
+        # browser makes of the pair afterwards (a dblclick among them).
+        touch_event(cdp, "touchStart", x, y)
+        landed = layout(page)
+        touch_event(cdp, "touchEnd", x, y)
+        page.wait_for_timeout(450)
+        assert in_order(landed), landed
+        assert self.panel_open(page) is True and in_order(layout(page)), layout(page)
+        page.close()
+
+    def test_swapped_a_press_the_assistant_takes_starts_no_drag(self, browser):
+        """Swapped, the divider's drag is this extension's; a press the open
+        panel takes starts none of it -- a finger's drag (no tap, so the panel
+        stays open, as a mouse's drag there does nothing either), and a
+        mouse's even where a browser hands the page the mousedown of a press
+        the assistant took (Chromium does not); a finger's tap only closes
+        the panel."""
+        page = open_page(browser, assistant=True, touch=True)
+        cdp = page.context.new_cdp_session(page)
+        x, y = handle_point(page, y_fraction=0)
+        page.mouse.dblclick(x, y)
+        settle(page)
+        before = layout(page)
+        assert swapped(before), before
+        page.wait_for_timeout(600)
+
+        page.evaluate("forgeAssistant.shell.open()")
+        settle(page)
+        x, y = handle_point(page, y_fraction=0)
+        finger_drag(page, cdp, x, y, 120)
+        dragged = layout(page)
+        assert self.panel_open(page) is True, "a drag is no tap"
+        assert dragged["template"] == before["template"] and not dragged["resizing"], dragged
+
+        page.evaluate("""([x, y]) => {
+            const handle = document.elementFromPoint(x, y);
+            handle.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
+            window.dispatchEvent(new MouseEvent("mousemove", {bubbles: true, button: 0, clientX: x + 120, clientY: y}));
+        }""", [x, y])
+        pressed = layout(page)
+        page.evaluate("([x, y]) => window.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, button: 0, clientX: x, clientY: y}))", [x + 120, y])
+        assert pressed["template"] == before["template"] and not pressed["resizing"], pressed
+
+        page.wait_for_timeout(450)
+        finger_tap(cdp, x, y)
+        page.wait_for_timeout(450)
+        tapped = layout(page)
+        assert self.panel_open(page) is False
+        assert swapped(tapped) and tapped["template"] == before["template"] and not tapped["resizing"], tapped
+        page.close()
+
+
 # --------------------------------------------------------------------------- #
 # Off                                                                          #
 # --------------------------------------------------------------------------- #
