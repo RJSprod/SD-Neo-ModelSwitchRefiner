@@ -1335,6 +1335,16 @@
         entry.boundary = null;
     }
 
+    /** Whether two columns stand side by side -- one wholly left of the
+     *  other, either way round -- rather than sharing any of the row's
+     *  width, one under the other. Either way round, because a double tap
+     *  on Forge's divider puts the results on the left
+     *  (model_chain_columns.js), and "the settings' right edge past the
+     *  results' left", the first reading, took that for a stacked row. */
+    function sideBySide(a, b) {
+        return a.right <= b.left + 1 || b.right <= a.left + 1;
+    }
+
     /** Measure one tab's row and write the numbers, or take them off; what
      *  was found, for `explainScroll`. Null for a tab that is not laid out,
      *  which keeps what it has: it is measured again when it is shown,
@@ -1345,8 +1355,7 @@
         const columnStyle = window.getComputedStyle(column);
         const docked = column.classList.contains(DOCKED_CLASS)
             || columnStyle.position === "fixed" || columnStyle.position === "absolute";
-        const stacked = !docked
-            && column.getBoundingClientRect().right > results.getBoundingClientRect().left + 1;
+        const stacked = !docked && !sideBySide(column.getBoundingClientRect(), results.getBoundingClientRect());
         let reason = docked ? "docked in the Forge Assistant's panel" : stacked ? "stacked under the settings" : "";
         if (!reason && window.getComputedStyle(results).position !== "sticky") {
             reason = "the results column is not held";

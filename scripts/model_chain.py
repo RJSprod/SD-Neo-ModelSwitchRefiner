@@ -215,6 +215,19 @@ kept in each browser. Default on, because it was asked for; off puts Forge's
 column back as it was found, on the page, without a reload.
 """
 
+OPT_SWAP_COLUMNS = "model_chain_swap_columns"
+"""Swap Txt2Img's and Img2Img's two columns by a double tap on the divider.
+Read by javascript/model_chain_columns.js.
+
+The ask (2026-11-23): "an option to be able to switch the two main columns on
+text to image and image to image tab ... double tab the drag area that i can
+drag to resize the columns should switch them left and right." Forge's own
+double tap on its divider put the first widths back; with this on it puts the
+settings and the results on each other's side, kept in each browser per tab.
+Default on, because it was asked for; off draws Forge's order again, on the
+page, and leaves the double tap to Forge.
+"""
+
 OPT_QUIET_NIGHT = "model_chain_quiet_night"
 """Draw the dark theme's primary buttons as a dim surface rather than a solid
 block of the accent. Read by javascript/model_chain_night.js.
@@ -505,6 +518,14 @@ shared.options_templates.update(
                 "On Txt2Img and Img2Img every block under the prompt boxes is an accordion, "
                 "and the last one, Settings Manager, reorders them and shows or hides each, "
                 "kept in each browser. Off puts Forge's column back as it was"
+            ),
+            OPT_SWAP_COLUMNS: shared.OptionInfo(
+                True,
+                "Double tap the divider to swap the two columns",
+            ).info(
+                "On Txt2Img and Img2Img a double tap or double click on the divider between the "
+                "settings and the results puts each on the other side, kept in each browser. Off "
+                "draws Forge's order and leaves the double tap to Forge, which resets the widths"
             ),
             OPT_QUIET_NIGHT: shared.OptionInfo(
                 True,

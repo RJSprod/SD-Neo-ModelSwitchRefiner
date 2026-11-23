@@ -10,6 +10,7 @@ and what it says under it.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -81,6 +82,11 @@ class TestTheSections:
         assert section_of(templates, model_chain.OPT_HIDE_FOOTER) == model_chain.PAGE_SECTION
         assert section_of(templates, model_chain.OPT_QUIET_NIGHT) == model_chain.PAGE_SECTION
         assert section_of(templates, model_chain.OPT_SETTINGS_MANAGER) == model_chain.PAGE_SECTION
+        assert section_of(templates, model_chain.OPT_SWAP_COLUMNS) == model_chain.PAGE_SECTION
+        assert templates[model_chain.OPT_SWAP_COLUMNS].default is True
+        # The page script reads the key the Settings page writes.
+        script = (Path(__file__).resolve().parent.parent / "javascript" / "model_chain_columns.js").read_text(encoding="utf-8")
+        assert f'const OPTION = "{model_chain.OPT_SWAP_COLUMNS}";' in script
         for key in (model_chain.OPT_SMOOTH, model_chain.OPT_STYLE_ENABLE,
                     model_chain.OPT_STYLE_THEME, model_chain.OPT_STYLE_COMPLETE):
             assert section_of(templates, key) == model_chain.PROGRESS_SECTION

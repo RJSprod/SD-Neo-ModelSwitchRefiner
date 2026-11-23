@@ -13298,6 +13298,54 @@ div.form > div.mc-lv-launch {
 }
 
 /* ==========================================================================
+   Model Chain -- the two columns, swapped by a double tap on the divider
+   ==========================================================================
+
+   Asked: "double tab the drag area that i can drag to resize the columns
+   should switch them left and right". javascript/model_chain_columns.js
+   names the swapped tabs on the root (`data-mc-columns-swapped`, from what
+   this browser kept, before the first paint) and these rules order the grid
+   Forge's resizeHandle.js makes of the row: the results first, then Forge's
+   handle, then the settings (or the accordion Forge wraps them in). Nothing
+   is moved in the document. The handle's own `grid-column: 2 / 3` is why the
+   three orders are all written: placed after the settings in the order, the
+   handle would find its column taken and drop to a second row.
+
+   Only while Forge's divider shows: below 704 px Forge makes the row a flex
+   row and hides the handle (an inline `display: none`), and the row stacks in
+   Forge's order, the settings on top.
+
+   The pixel of margin is for Forge's mobile script, which takes a results
+   column at `offsetLeft === 0` for a phone's stacked layout and moves
+   Generate's box into it at the next window resize -- the same pixel the
+   Forge Assistant's dock gives the column (`.forge-assistant-docked-beside`). */
+:root[data-mc-columns-swapped~="txt2img"] .resize-handle-row:has(> #txt2img_results):has(> .resize-handle:not([style*="display: none"])) > *,
+:root[data-mc-columns-swapped~="img2img"] .resize-handle-row:has(> #img2img_results):has(> .resize-handle:not([style*="display: none"])) > * {
+    order: 3;
+}
+
+:root[data-mc-columns-swapped~="txt2img"] .resize-handle-row:has(> #txt2img_results):has(> .resize-handle:not([style*="display: none"])) > .resize-handle,
+:root[data-mc-columns-swapped~="img2img"] .resize-handle-row:has(> #img2img_results):has(> .resize-handle:not([style*="display: none"])) > .resize-handle {
+    order: 2;
+}
+
+:root[data-mc-columns-swapped~="txt2img"] .resize-handle-row:has(> #txt2img_results):has(> .resize-handle:not([style*="display: none"])) > #txt2img_results,
+:root[data-mc-columns-swapped~="img2img"] .resize-handle-row:has(> #img2img_results):has(> .resize-handle:not([style*="display: none"])) > #img2img_results {
+    order: 1;
+    margin-left: 1px !important;
+}
+
+/* A finger on the divider drags it or taps it, and the page does not pan
+   under it: the script's touch listener is passive (a listener on the window
+   that is not would hold up every touch on the page), so this is what keeps
+   a drag of a swapped row, which the script takes from Forge, from scrolling
+   the page as well. */
+.resize-handle-row:has(> #txt2img_results) > .resize-handle,
+.resize-handle-row:has(> #img2img_results) > .resize-handle {
+    touch-action: none;
+}
+
+/* ==========================================================================
    Voice Box
    ==========================================================================
 
