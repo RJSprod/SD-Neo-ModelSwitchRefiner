@@ -4953,4 +4953,7 @@ columns share any of the row's width, so a swapped row is filled as the other wa
 round is, and a stacked one still is not (`tests/test_theme_layout.py`, the two
 phases swapped and the stacked row's reason). The dock needs nothing: a docked
 column is out of the row, and `besideOf` reads the swapped results' pixel of margin
-as beside, which they are.
+as beside, which they are -- a swapped tab docks, fills the row, keeps Generate where
+it was through window resizes, takes no swap from a double tap where the hidden
+divider was, and undocks swapped (`TestWithTheAssistantsDock` in
+`tests/test_columns_swap.py`).

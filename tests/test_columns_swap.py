@@ -370,7 +370,12 @@ def tab_html(tab: str, shown: bool, blocks: int) -> str:
   </div>"""
 
 
-def page_html(opts: dict, *, theme: bool, blocks: int) -> str:
+def page_html(opts: dict, *, theme: bool, blocks: int, assistant: bool = False) -> str:
+    """`assistant` puts the Forge Assistant's scripts on the page, in Forge's
+    order: this extension's folder is loaded alphabetically, so they come
+    before the columns' script."""
+    helpers = "".join(f'<script src="/javascript/{path.name}"></script>'
+                      for path in sorted((ROOT / "javascript").glob("forge_assistant*.js"))) if assistant else ""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>{GRADIO_CSS}{FORGE_CSS}</style>
@@ -408,6 +413,7 @@ window.firstPaint = null;
 </script>
 <script>{FORGE_RESIZE_HANDLE_JS}</script>
 <script>{FORGE_MOBILE_JS}</script>
+{helpers}
 <script src="/javascript/model_chain_columns.js"></script>
 <script>window.firstPaint = document.documentElement.getAttribute("data-mc-columns-swapped");</script>
 {'<script src="/javascript/model_chain_theme.js"></script>' if theme else ""}
@@ -457,18 +463,21 @@ def settle(page, frames: int = 3) -> None:
 
 
 def open_page(browser, opts=None, *, theme=False, width=1400, height=900, context=None, touch=False, blocks=30,
-              loaded=True):
+              loaded=True, assistant=False):
     """A page of its own context, or one in a context given -- two pages of one
     context share a localStorage, which is what the first paint reads."""
     owner = context or browser.new_context(viewport={"width": width, "height": height}, has_touch=touch)
     page = owner.new_page()
     settings = dict({"model_chain_theme": theme}, **(opts or {}))
-    html = page_html(settings, theme=theme, blocks=blocks)
+    html = page_html(settings, theme=theme, blocks=blocks, assistant=assistant)
     page.route(ORIGIN + "/**", lambda route: _answer(route, html))
     page.goto(ORIGIN + "/")
     page.wait_for_function("!!window.mcColumns" + (" && !!window.mcTheme" if theme else ""))
     if loaded:
         load(page)
+        if assistant:
+            page.wait_for_function("!!(window.forgeAssistant && window.forgeAssistant.shell)")
+            settle(page)
     return page
 
 
@@ -960,6 +969,123 @@ class TestWithTheTheme:
         held = page.evaluate("mcTheme.explainScroll()[0]")
         assert held["reason"] == "", "side by side either way round, not stacked: " + json.dumps(held)
         assert page.evaluate("document.querySelector('#txt2img_settings').classList.contains('mc-theme-scroll-settings')")
+        page.close()
+
+
+# --------------------------------------------------------------------------- #
+# The Forge Assistant's dock                                                   #
+# --------------------------------------------------------------------------- #
+
+# Where Txt2Img's columns are with the Forge Assistant's dock on the page.
+DOCKED = """() => {
+    const results = document.getElementById("txt2img_results");
+    const settings = document.getElementById("txt2img_settings");
+    const row = results.parentElement;
+    const r = results.getBoundingClientRect(), w = row.getBoundingClientRect();
+    const handle = row.querySelector(":scope > .resize-handle");
+    return {left: r.left - w.left, width: r.width, rowWidth: w.width,
+            docked: forgeAssistant.dock.isDocked("tab_txt2img"),
+            settingsPosition: getComputedStyle(settings).position,
+            beside: results.classList.contains("forge-assistant-docked-beside"),
+            handleShown: getComputedStyle(handle).display !== "none",
+            offsetLeft: results.offsetLeft, mobile: results.classList.contains("mobile"),
+            generateIn: document.getElementById("txt2img_generate_box").parentElement.id,
+            attribute: document.documentElement.getAttribute("data-mc-columns-swapped"),
+            kept: localStorage.getItem("mc-columns-swapped:txt2img")};
+}"""
+
+
+def dock(page):
+    """The settings column into the Forge Assistant's panel, as its settings
+    button does it: the panel opened, the button pressed."""
+    page.evaluate("forgeAssistant.shell.open(); forgeAssistant.shell.toggleDock()")
+    settle(page, 4)
+
+
+def undock(page):
+    """Back into the page: the panel opened (a tap outside puts it away and
+    leaves the column docked, out of sight), the button pressed again."""
+    page.evaluate("forgeAssistant.shell.open(); forgeAssistant.shell.toggleDock(); forgeAssistant.shell.close()")
+    settle(page, 4)
+
+
+class TestWithTheAssistantsDock:
+    """The Forge Assistant draws a tab's settings column in its panel
+    (docs/22 §3.29 and §3.41): the column out of the row, fixed over the
+    panel, the row given one track and Forge's divider hidden, and the
+    results a pixel off the row's edge for Forge's mobile script
+    (`forge-assistant-docked-beside`, decided by where the results were
+    before the dock). Swapped, the results were on the left before the dock
+    -- a pixel off the edge, by the swap's own margin -- so the dock finds
+    them beside the settings, as unswapped."""
+
+    def test_a_swapped_tab_docks_and_undocks_as_an_unswapped_one(self, browser):
+        page = open_page(browser, assistant=True, touch=True)
+        cdp = page.context.new_cdp_session(page)
+        at_rest = layout(page)
+        generate = at_rest["generateIn"]
+
+        # Unswapped, docked: the results fill the row a pixel off its edge.
+        dock(page)
+        plain = page.evaluate(DOCKED)
+        assert plain["docked"] and plain["settingsPosition"] == "fixed" and not plain["handleShown"], plain
+        assert plain["beside"] and plain["left"] == 1 and abs(plain["width"] - (plain["rowWidth"] - 1)) <= 1, plain
+        undock(page)
+        assert in_order(layout(page))
+
+        # Swapped, by a double click on the divider, with a width of the
+        # user's own: the settings narrower than the results.
+        x, y = handle_point(page)
+        mouse_drag(page, x, y, -120)
+        page.wait_for_timeout(450)
+        x, y = handle_point(page)
+        page.mouse.dblclick(x, y)
+        settle(page)
+        swapped_at_rest = layout(page)
+        assert swapped(swapped_at_rest) and swapped_at_rest["kept"] == "1", swapped_at_rest
+        assert swapped_at_rest["generateIn"] == generate, swapped_at_rest
+
+        # Docked: the results fill the row exactly as they did unswapped.
+        dock(page)
+        docked = page.evaluate(DOCKED)
+        assert docked["docked"] and docked["settingsPosition"] == "fixed" and not docked["handleShown"], docked
+        assert docked["beside"] and docked["offsetLeft"] >= 1, docked
+        assert abs(docked["left"] - plain["left"]) <= 1 and abs(docked["width"] - plain["width"]) <= 1, (plain, docked)
+        assert docked["generateIn"] == generate and not docked["mobile"], docked
+
+        # Forge's mobile script, at every window resize: never a phone.
+        for width in (1300, 1500, 1400):
+            page.set_viewport_size({"width": width, "height": 900})
+            page.wait_for_timeout(150)
+        settle(page, 4)
+        resized = page.evaluate(DOCKED)
+        assert resized["docked"] and resized["generateIn"] == generate and not resized["mobile"], resized
+
+        # A double tap where the divider was -- a mouse's and a finger's -- with
+        # the divider hidden by the dock: nothing to swap, the dock as it was.
+        page.wait_for_timeout(600)
+        page.mouse.dblclick(x, y)
+        page.wait_for_timeout(600)
+        finger_tap(cdp, x, y)
+        page.wait_for_timeout(120)
+        finger_tap(cdp, x, y)
+        page.wait_for_timeout(450)
+        tapped = page.evaluate(DOCKED)
+        assert tapped["docked"] and tapped["settingsPosition"] == "fixed" and not tapped["handleShown"], tapped
+        assert tapped["attribute"] == "txt2img" and tapped["kept"] == "1", "no swap while docked: " + json.dumps(tapped)
+        assert abs(tapped["left"] - resized["left"]) <= 1 and abs(tapped["width"] - resized["width"]) <= 1, (resized, tapped)
+        assert tapped["generateIn"] == generate and not tapped["mobile"], tapped
+
+        # Undocked: the swapped layout back, each column as wide as before
+        # (the window went round three widths and back; Forge scales the
+        # first track by each change and rounds down).
+        undock(page)
+        back = layout(page)
+        assert swapped(back) and back["kept"] == "1", back
+        assert abs(back["settings"]["width"] - swapped_at_rest["settings"]["width"]) <= 4, (swapped_at_rest, back)
+        assert abs(back["results"]["width"] - swapped_at_rest["results"]["width"]) <= 4, (swapped_at_rest, back)
+        assert back["generateIn"] == generate and not back["mobile"], back
+        assert page.evaluate("forgeAssistant.dock.isDocked('tab_txt2img')") is False
         page.close()
 
 

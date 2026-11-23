@@ -1257,8 +1257,11 @@ pan, Forge's minimums, Forge's class during the drag; a reload swapped from the
 first paint, a narrow window stacked in Forge's order and swapped again when wide,
 a window resize scaling the swapped drag; Generate never moved by the mobile
 script, with and without the theme; the theme's one scroller holding the swapped
-columns; off drawing Forge's order and leaving the double click to Forge, the
-setting remembered for the first paint), `tests/test_columns_swap_js.py` (node: the
+columns; with the Forge Assistant's scripts on the page, a swapped tab docked in its
+panel filling the row as an unswapped one does, Generate unmoved through window
+resizes, a double tap where the divider was doing nothing while docked, and undocking
+bringing the swap back; off drawing Forge's order and leaving the double click to
+Forge, the setting remembered for the first paint), `tests/test_columns_swap_js.py` (node: the
 template, the clamp, the double tap, the first paint, the listeners), and in
 `tests/test_theme_layout.py` the two phases with the columns swapped and the
 assistant's fill on, and the fill's stacked reading on a phone. Thirty mutations
@@ -1267,5 +1270,9 @@ each fail a test; four survived a first pass (the mouse's stop, masked by the
 script's later write -- now every write on the way is read; the guard, which the
 first touch test reached only after the columns had moved from under the
 finger; Forge's touch drag, from equal halves; the fill's stacked side, which no
-test had read) and their tests were tightened. Not run on the user's machine or in
-a Gecko build.
+test had read) and their tests were tightened. The dock's check was added after a
+review asked for it, and needed no change to the code: six more mutations -- the
+swap's pixel of margin, and the dock's hidden divider, one track, pixel of margin
+and reading of "beside" -- each fail it; a seventh, the swap's rule for the results
+off while docked, changes nothing (the dock gives the same pixel, and one column has
+no order). Not run on the user's machine or in a Gecko build.
