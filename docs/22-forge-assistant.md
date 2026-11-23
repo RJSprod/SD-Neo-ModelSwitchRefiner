@@ -4942,3 +4942,23 @@ setting's width kept in focus mode; the quick settings hung from the workspace's
 top). The same probe in Zen, driven by Selenium, read
 the old stylesheet's column page at 4,704 px from the window's top and the new one's
 at 624 px under its head, scrolling. Not run on the user's machine.
+
+## 3.57 The fill with the columns swapped (2026-11-23)
+
+A double tap on Forge's divider puts Txt2Img's or Img2Img's results on the left
+(`javascript/model_chain_columns.js`; docs/24, *The two columns swapped by a double
+tap on the divider*). `Fill.read` took "the settings' right edge past the results'
+left" for the stacked row of a phone and filled nothing; it asks now whether the two
+columns share any of the row's width, so a swapped row is filled as the other way
+round is, and a stacked one still is not (`tests/test_theme_layout.py`, the two
+phases swapped and the stacked row's reason). The dock needs nothing: a docked
+column is out of the row, and `besideOf` reads the swapped results' pixel of margin
+as beside, which they are -- a swapped tab docks, fills the row, keeps Generate where
+it was through window resizes, takes no swap from a double tap where the hidden
+divider was, and undocks swapped (`TestWithTheAssistantsDock` in
+`tests/test_columns_swap.py`). And the swap keeps §3.45's rule: `tapOutside` records
+the tap that put the panel away (`lastTapOutside`, its point, time and frame), so a
+double click whose first click was that tap swaps nothing and lets no reset of
+Forge's run, and a touch on the divider while the panel is open (with Tap Outside to
+Close on) is kept from the swap and from Forge's divider alike
+(`TestWithTheAssistantsPanelOpen`).

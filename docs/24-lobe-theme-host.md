@@ -1182,3 +1182,105 @@ Forge Neo's own click strings, quotes and escapes, an embedding's). Thirteen mut
 each fail a test; one survived a first pass (a mark scheduled at every update, which
 the page shown at every update already does) and the redundant call was taken out.
 Not run on the user's machine.
+
+## The two columns swapped by a double tap on the divider (2026-11-23)
+
+> "Unrelated, want an option to be able to switch the two main columns on text to
+> image and image to image tab. I'm thinking, double tab the drag area that i can
+> drag to resize the columns should switch them left and right. Double tap seems
+> like a natural gesture."
+
+Not the theme's: `javascript/model_chain_columns.js`, its section of `style.css`
+(*Model Chain -- the two columns, swapped by a double tap on the divider*) and one
+setting, `model_chain_swap_columns` (Settings → Model Chain: Page, on). It is here
+because the layout of the two columns is, and two readings of it changed.
+
+**The drag area is Forge's.** Forge Neo's `javascript/resizeHandle.js` (read at
+6d5aa3b) makes each `.resize-handle-row` a grid of three tracks -- the row's first
+child, a 16 px `.resize-handle` placed by `grid-column: 2 / 3`, the last child --
+writes `1fr 16px 1fr` (kept as `style.originalGridTemplateColumns`), and below
+704 px (`GRADIO_MIN_WIDTH * 2 + PAD * 4`) makes the row a flex row with the handle
+`display: none`, 100 ms after a resize. Its drag writes `${w}px 16px 1fr`, `w` the
+row's first child's width at the press plus the pointer's travel; a double click,
+or two touchstarts within 200 ms, put the first template back; a window resize
+scales the first track by the row's change of width.
+
+**Swapped by order, nothing moved.** The script names the swapped tabs on the root
+(`data-mc-columns-swapped`, per tab in `localStorage["mc-columns-swapped:<tab>"]`,
+written when the script loads, so Forge's grid is drawn swapped from its first
+paint); the stylesheet orders the row's items under it -- the results 1, the
+handle 2, everything else 3 -- only while `:has(> .resize-handle:not([style*="display:
+none"]))`, Forge's own word for "divided". All three orders are written: the
+handle's column is definite and its row automatic, so placed after the settings it
+finds column 2 taken and drops to a second row. A swap keeps each column's width:
+equal halves keep Forge's first template; anything else is written as Forge's
+`${w}px 16px 1fr` with the width of the column now first (`swappedTemplate`, read
+before the attribute changes and written after, nothing painted between).
+
+**What it takes from Forge.** The window's capture phase hears every press before
+the handle does. A dblclick, and a second touch on the same divider within 300 ms of
+a first that did not travel (`isDoubleTap`, Android's double-tap time), swap and
+stop the event, so Forge's reset never runs. While a tab is swapped its mousedown
+and touchstart on the divider are taken too and the drag is the script's: Forge's
+would size the first track from the settings' width, the DOM-first child, wherever
+they are drawn. The script's drag writes Forge's format with Forge's clamp
+(`dragWidth`; the row's own `minLeftColWidth`/`minRightColWidth`, crossed) and
+Forge's `resizing` class on the body. The touch listener is passive -- a
+non-passive one on the window would hold up every touch on the page -- so
+`touch-action: none` on these two dividers keeps a finger's drag from panning
+the page; and since nothing cancels a swapped double tap's touches, the browser
+makes mouse events of them where the finger was, on the other column after the
+swap (Chromium: mousedown, click, and a dblclick for the pair), so those are
+taken for half a second (`swallow`), and a second swap within that half second is
+the same gesture's (`SWAP_GUARD_MS`). And while the Forge Assistant's panel is
+open, a press outside it only puts it away (the user's rule, docs/22 §3.45), so a
+double tap whose first press landed then is that closing tap and one plain tap:
+neither a swap nor Forge's reset, decided from the assistant's own state -- its panel
+open with Tap Outside to Close on, read at a touch's press (`closingPress`, the touch
+and any mousedown of it kept from Forge too), and for a double click, whose first
+press the browser never hands the page once the assistant has cancelled it, the tap
+the assistant records as it puts the panel away (`lastTapOutside`: within a second
+and 16 px of the dblclick, `afterClosingTap`).
+
+**Forge's mobile script** reads a results column at `offsetLeft === 0` as a phone
+and moves Generate into it at the next resize. Gradio 4.40's row is positioned, so
+a results column on its left edge is exactly that: swapped, the results get the
+dock's pixel of margin (`margin-left: 1px !important`, as
+`.forge-assistant-docked-beside`), only while divided -- stacked on a phone they are
+the phone's column and the script must see 0.
+
+**Two readings of the row.** The one scroller (`measureScroll`) and the Forge
+Assistant's fill (`Fill.read`) took "the settings' right edge past the results'
+left" for a stacked row, which a swapped row is, and held and filled nothing. Both
+ask now whether the two columns share any of the row's width (`sideBySide`).
+
+Tests: `tests/test_columns_swap.py` (Chromium, Gradio 4.40's row, column and tab
+rules at their values, Forge Neo's own resize handle and mobile scripts as they are:
+a double click and a double tap swap and swap back, each column's width kept and
+Forge's reset not run, one touch or two slow ones not a double tap, a drag then a
+touch not one, the double tap's mouse events pressing nothing, two swaps at once
+one; Forge's drag sizing the settings unswapped, the script's sizing the results
+swapped with every width written on the way the results', a finger's too without a
+pan, Forge's minimums, Forge's class during the drag; a reload swapped from the
+first paint, a narrow window stacked in Forge's order and swapped again when wide,
+a window resize scaling the swapped drag; Generate never moved by the mobile
+script, with and without the theme; the theme's one scroller holding the swapped
+columns; with the Forge Assistant's scripts on the page, a swapped tab docked in its
+panel filling the row as an unswapped one does, Generate unmoved through window
+resizes, a double tap where the divider was doing nothing while docked, and undocking
+bringing the swap back; off drawing Forge's order and leaving the double click to
+Forge, the setting remembered for the first paint), `tests/test_columns_swap_js.py` (node: the
+template, the clamp, the double tap, the first paint, the listeners), and in
+`tests/test_theme_layout.py` the two phases with the columns swapped and the
+assistant's fill on, and the fill's stacked reading on a phone. Thirty mutations
+of the script, the stylesheet and the two readings and fifteen of the pure parts
+each fail a test; four survived a first pass (the mouse's stop, masked by the
+script's later write -- now every write on the way is read; the guard, which the
+first touch test reached only after the columns had moved from under the
+finger; Forge's touch drag, from equal halves; the fill's stacked side, which no
+test had read) and their tests were tightened. The dock's check was added after a
+review asked for it, and needed no change to the code: six more mutations -- the
+swap's pixel of margin, and the dock's hidden divider, one track, pixel of margin
+and reading of "beside" -- each fail it; a seventh, the swap's rule for the results
+off while docked, changes nothing (the dock gives the same pixel, and one column has
+no order). Not run on the user's machine or in a Gecko build.

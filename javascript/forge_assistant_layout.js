@@ -505,11 +505,15 @@
         // Beside the settings, or alone in the row (docked, or a tab without
         // them). Stacked under them -- a phone, or Forge's own narrow layout --
         // the column is one more thing in a page that scrolls, and a window's
-        // worth of gallery there would be a gallery to scroll past.
-        const left = row && row.firstElementChild !== results ? row.firstElementChild : null;
-        if (left && laidOut(left) && !docked(left)) {
-            const leftBox = left.getBoundingClientRect();
-            if (leftBox.right > resultsBox.left + 1) {
+        // worth of gallery there would be a gallery to scroll past. Beside them
+        // on either side: a double tap on Forge's divider puts the results on
+        // the left (model_chain_columns.js), and the first reading here -- the
+        // settings' right edge past the results' left -- took that for stacked.
+        const settings = row && row.firstElementChild !== results ? row.firstElementChild : null;
+        if (settings && laidOut(settings) && !docked(settings)) {
+            const settingsBox = settings.getBoundingClientRect();
+            const beside = settingsBox.right <= resultsBox.left + 1 || resultsBox.right <= settingsBox.left + 1;
+            if (!beside) {
                 return {height: null, reason: "stacked under the settings"};
             }
         }

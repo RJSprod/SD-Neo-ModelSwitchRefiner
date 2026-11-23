@@ -3380,6 +3380,38 @@ class TestOneScrollerForThePage:
         assert abs(half["generate"]["top"] - back["generate"]["top"]) <= 0.5, (half["generate"], back["generate"])
         page.close()
 
+    def test_with_the_columns_swapped_by_the_divider_the_two_phases_are_the_same(self, browser):
+        """A double tap on Forge's divider puts the results on the left and the
+        settings on the right (model_chain_columns.js; the stylesheet orders
+        Forge's grid under the root's attribute). The one scroller and the
+        Forge Assistant's fill both took "the settings' right edge past the
+        results' left" for a row stacked as on a phone, and held and filled
+        nothing; side by side either way round, the phases are what they are
+        with the settings on the left."""
+        page = open_page(browser, assistant=USER_CSS_WHOLE, grid_row=True)
+        page.evaluate("document.documentElement.setAttribute('data-mc-columns-swapped', 'txt2img')")
+        page.evaluate("window.dispatchEvent(new Event('resize'))")
+        settle(page, 8)
+        sides = page.evaluate("""() => {
+            const box = (id) => document.getElementById(id).getBoundingClientRect();
+            return {results: box('txt2img_results').right, settings: box('txt2img_settings').left};
+        }""")
+        assert sides["results"] <= sides["settings"] + 1, sides
+        assert page.evaluate("forgeAssistant.fill.read('txt2img').reason") != "stacked under the settings"
+        assert page.evaluate("document.getElementById('txt2img_results').hasAttribute('data-forge-assistant-fill')")
+        rest = scroll_to(page, 0)
+        assert rest["attribute"] == "settings-first" and rest["settingsHeld"] is True and rest["rowMin"], rest
+        first, second = phases(rest)
+        assert first > 600 and second > 100, (first, second)
+        half = scroll_to(page, first // 2)
+        assert abs(half["generate"]["top"] - rest["generate"]["top"]) <= 0.5, (half["generate"], rest["generate"])
+        assert abs(half["settings"]["top"] - (rest["settings"]["top"] - first // 2)) <= 0.5, half
+        mid = scroll_to(page, first + second // 2)
+        assert abs(mid["settings"]["bottom"] - rest["viewBottom"]) <= 1, mid
+        assert abs(mid["generate"]["top"] - (rest["generate"]["top"] - second // 2)) <= 1, mid
+        one_column_at_a_time(page, rest)
+        page.close()
+
     def test_stacked_under_the_settings_as_on_a_phone_nothing_is_held(self, browser):
         page = open_page(browser, assistant=USER_CSS_WHOLE)
         settle(page, 8)
@@ -3389,6 +3421,8 @@ class TestOneScrollerForThePage:
         rest = scroll_to(page, 0)
         assert rest["results"]["top"] >= rest["settings"]["bottom"] - 1, "the results under the settings"
         assert rest["rowMin"] == "" and rest["hold"] == "" and rest["settingsHeld"] is False, rest
+        # The Forge Assistant fills no window's worth of gallery there either.
+        assert page.evaluate("forgeAssistant.fill.read('txt2img').reason") == "stacked under the settings"
         moved = scroll_to(page, 300)
         assert abs(moved["settings"]["top"] - (rest["settings"]["top"] - 300)) <= 0.5, moved
         assert abs(moved["results"]["top"] - (rest["results"]["top"] - 300)) <= 0.5, moved

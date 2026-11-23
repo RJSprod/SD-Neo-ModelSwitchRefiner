@@ -615,7 +615,9 @@ appearance settings ([Progress-bar appearance](#progress-bar-appearance)).
 
 **Model Chain: Page** — **Hide the WebUI footer** (default on), **Settings in
 accordions, with a Settings Manager** (default on, [Settings in accordions, and
-the Settings Manager](#settings-in-accordions-and-the-settings-manager)) and
+the Settings Manager](#settings-in-accordions-and-the-settings-manager)),
+**Double tap the divider to swap the two columns** (default on, [The two
+columns, swapped by a double tap](#the-two-columns-swapped-by-a-double-tap)) and
 **Quieter night mode** (default on, [A quieter night mode](#a-quieter-night-mode)).
 
 **Model Chain: LLM Studio** — the tab, the vision projector, the prompt caches,
@@ -8565,6 +8567,42 @@ Gradio. **Settings in accordions, with a Settings Manager** in Settings → Mode
 Chain: Page, switched off, puts every block back where Forge drew it, on the
 page, without a reload; switched on again, your arrangement comes back with it.
 
+## The two columns, swapped by a double tap
+
+On Txt2Img and Img2Img a double tap, or a double click, on the divider between
+the settings and the results — Forge's own, the strip you drag to size the two —
+puts each column on the other side, and another puts them back (since
+2026-11-23: "double tab the drag area that i can drag to resize the columns
+should switch them left and right"). Forge's own double tap there put its first
+widths back; it swaps instead now.
+
+- **Each column keeps its width.** Drag the settings to 500 px and swap, and they
+  are 500 px wide on the right.
+- **The drag works either way round.** The divider follows the finger or the
+  mouse, and the column on its left grows as it goes right, whichever column
+  that is.
+- **Kept in this browser, for each tab,** and drawn from the page's first paint:
+  a reload does not show Forge's order first.
+- **Only while the divider shows.** Below 704 px Forge stacks the two, the
+  settings on top, and that stays Forge's; widened again, the swap is back.
+- The mouse events a browser makes of a double tap land where the finger was,
+  which after a swap is the other column (a picture in the gallery, a button
+  among the settings): they are taken for half a second.
+- **With the Forge Assistant's panel open, the first press only closes it**, as
+  every tap outside it does: a double tap or double click on the divider whose
+  first press put the panel away is that and one plain tap — no swap, and no
+  reset of Forge's either; the next double tap swaps.
+- Nothing is moved on the page: the columns are drawn in the other order, so
+  every script that finds them by their ids — Forge's, Gradio's, the Forge
+  Assistant's dock, the Settings Manager — finds them as before. Forge's own
+  mobile script, which moves Generate into the results when it takes the page for
+  a phone's, never takes the swapped page for one; the Forge Assistant's fill and
+  the Model Chain theme's one scroller work the same with the results on the left.
+
+**Double tap the divider to swap the two columns** in Settings → Model Chain:
+Page, switched off, draws Forge's order again, on the page, and leaves the double
+tap to Forge; your choice is kept for when it is on again.
+
 ## Layout
 
 ```
@@ -8754,6 +8792,7 @@ javascript/model_chain_night.js      the quieter night mode's one attribute
 javascript/model_chain_lora_details.js  the LoRA dialog's chips, clipboard, cards and preset watcher
 javascript/model_chain_lora_viewer.js   the LoRA viewer: the Lora Viewer button under the Prompt and the dialog
 javascript/model_chain_settings_manager.js   the settings under the prompts as accordions, and the Settings Manager
+javascript/model_chain_columns.js     Txt2Img's and Img2Img's two columns swapped by a double tap on Forge's divider
 tests/                pytest suite (runs without a WebUI)
 pytest.ini            the suite's temporary folders: kept only for failures
 tools/                maintainer scripts; never imported by the extension
