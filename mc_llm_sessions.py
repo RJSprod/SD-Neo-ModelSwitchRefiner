@@ -1409,6 +1409,24 @@ def conversation(request: ChatRequest, cancel: Cancellation):
     yield from _traced("a conversation reply", _conversation(request, cancel))
 
 
+def _instructions(variant: str, image: str | None, system: str | None):
+    """``(system, words)``: the instructions a run is written under, and how its
+    console line says so.
+
+    A caller's own instructions are its request's alone. Without them the run
+    takes the instructions saved for its set (:mod:`mc_llm_instructions`), the
+    ones the system prompt editor writes, which is what makes one edit reach
+    every door: LLM Studio's MiniMax workspace, Mini Paint's Clipboard and Send
+    to WanGP, any other caller. With neither, ``None``: the writer's default.
+    """
+    if system is not None:
+        return system, " under caller instructions"
+    import mc_llm_instructions
+
+    found = mc_llm_instructions.saved(variant, has_image=image is not None)
+    return (found, " under saved instructions") if found is not None else (None, "")
+
+
 def minimax(prompt: str, variant: str, image: str | None, seed: int,
             cancel: Cancellation, system: str | None = None, trace: str = ""):
     """One MiniMax enhancement. See :func:`_minimax`.
@@ -1416,7 +1434,8 @@ def minimax(prompt: str, variant: str, image: str | None, seed: int,
     Whether the instructions were overridden reaches the console line as a word,
     because a run that came back unlike its neighbours is a run somebody has to
     be able to account for -- and the override itself, which is caller-supplied
-    text, is no more logged than a prompt is.
+    text, is no more logged than a prompt is. A run with no instructions of its
+    own takes the saved ones (:func:`_instructions`), and says that instead.
 
     ``trace`` is the external queue's name for the request -- its id and who
     asked -- and goes on the end of every console line this run writes. A
@@ -1424,8 +1443,12 @@ def minimax(prompt: str, variant: str, image: str | None, seed: int,
     six identical "a MiniMax fl2va enhancement" lines with nothing to say which
     started, which finished, and which is the one somebody is asking about.
     """
-    yield from _traced(f"a MiniMax {variant} enhancement"
-                       + (" under caller instructions" if system is not None else "")
+    from prompt_master.minimax import enhancer
+
+    # The set the run is written under: an unknown variant is FL2VA's run, so
+    # it is FL2VA's saved instructions too.
+    system, under = _instructions(enhancer.variant_of(variant), image, system)
+    yield from _traced(f"a MiniMax {variant} enhancement" + under
                        + (f" ({trace})" if trace else ""),
                        _minimax(prompt, variant, image, seed, cancel, system))
 
@@ -1436,14 +1459,19 @@ def ltx(prompt: str, image: str | None, seed: int, cancel: Cancellation,
 
     Named on the console the way a MiniMax request is: what kind of run and for
     which LTX model, whether a first frame was shown, whether the caller
-    replaced the instructions, and the external queue's name for the request.
-    Never the prompt, the picture or the override.
+    replaced the instructions or the saved ones were used, and the external
+    queue's name for the request. Never the prompt, the picture or the
+    instructions.
     """
     import mc_llm_ltx as ltx_writer
 
+    # LTX 2.5 runs under LTX 2.3's set, and anything else is LTX 2.3's run.
+    written_for = ltx_writer.LTX25 if str(model or "").strip().casefold() == ltx_writer.LTX25 \
+        else ltx_writer.LTX23
+    system, under = _instructions(written_for, image, system)
     yield from _traced(f"an {ltx_writer.model_name(model)} prompt"
                        + (" from a first frame" if image is not None else "")
-                       + (" under caller instructions" if system is not None else "")
+                       + under
                        + (f" ({trace})" if trace else ""),
                        _ltx(prompt, image, seed, cancel, system, model))
 

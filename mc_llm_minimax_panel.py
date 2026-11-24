@@ -48,6 +48,28 @@ noticeably slower than the number it is showing reads as frozen.
 """
 
 
+OPEN_SYSTEM_PROMPT = """(variant, image) => {
+    const sheet = window.mcSheet;
+    if (sheet && typeof sheet.systemPrompt === "function") {
+        sheet.systemPrompt({name: "system-prompt", variant: String(variant || ""),
+                            mode: image ? "image" : "text"});
+    } else {
+        console.warn("Model Chain: the system prompt editor is not on this page");
+    }
+    return [];
+}"""
+"""The inspector's System prompt, run in the browser and nowhere else.
+
+The editor is ``javascript/mc_sheet.js``'s, the one every door shares -- Mini
+Paint NEO's Clipboard tab and its Send to WanGP prompt editor open it too -- on
+the variant chosen here, with a reference frame or without as the image box
+says. It reads and writes the instructions over its own route
+(:mod:`mc_llm_instructions_api`); a Gradio round trip would add nothing. An
+edit is the instructions of every request that brings none of its own, this
+workspace's included (:mod:`mc_llm_instructions`).
+"""
+
+
 def build() -> dict:
     """Assemble the panel. Returns the handles the shell needs."""
     from prompt_master.core.models import RANDOM_SEED
@@ -139,6 +161,13 @@ def build() -> dict:
                 label="Variant", choices=ui.choices(enhancer.VARIANTS),
                 value=prefs.get("minimax_variant") or enhancer.FL2VA,
                 elem_id=ui.ident("minimax", "variant"))
+            # The instructions this workspace writes under, one set per variant
+            # with a reference frame and without, in the editor every door
+            # shares: what is saved there is what every request without its own
+            # runs under -- here, Mini Paint's Clipboard and Send to WanGP alike.
+            system_open = gr.Button("System prompt", size="sm",
+                                    elem_id=ui.ident("minimax", "system-prompt"),
+                                    elem_classes=ui.classes("system-open"))
             seed = ui.seed_box(
                 info=f"{RANDOM_SEED} draws a fresh seed for every prompt.")
             with gr.Accordion("What an H3 prompt is made of", open=False):
@@ -148,6 +177,8 @@ def build() -> dict:
     # -- wiring ----------------------------------------------------------- #
 
     variant.change(fn=_structure, inputs=[variant], outputs=[structure], queue=False)
+    system_open.click(fn=None, inputs=[variant, image], outputs=None, js=OPEN_SYSTEM_PROMPT,
+                      queue=False)
 
     running = enhance.click(
         fn=_enhance, inputs=[prompt, variant, image, seed],

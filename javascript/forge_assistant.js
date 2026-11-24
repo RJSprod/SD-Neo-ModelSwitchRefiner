@@ -6358,9 +6358,16 @@
     // Focus mode is deliberately untouched. The dialog draws above it now, so
     // there is nothing to leave, and a workspace that emptied itself every
     // time a popup opened would be worse than the bug.
+    //
+    // A sheet is not yielded to (mc_sheet.js, `sheet: true` on the event): it
+    // covers the whole window and dims it, panel and all, so there is nothing
+    // the panel is in the way of -- and the gear's editor is opened from the
+    // docked settings column, inside the panel, which has to be where it was
+    // when the editor closes.
     Shell.prototype.yieldTo = function (event) {
         const detail = (event && event.detail) || {};
         if (!detail.open) return false;
+        if (detail.sheet === true) return false;
         if (!this.state.panelOpen) return false;
         this.closeMenu();
         this.close();
@@ -6380,6 +6387,8 @@
         // And the LoRA viewer's, which cancels it (model_chain_lora_viewer.js
         // takes Escape on the window first; this is the same answer if not).
         if (window.mcLoraViewer && window.mcLoraViewer.isOpen()) return;
+        // And a sheet's (mc_sheet.js), which takes Escape on the window first.
+        if (window.mcSheet && window.mcSheet.isOpen()) return;
         const context = {
             composing: event.isComposing || event.keyCode === 229,
             nativeDialog: false,

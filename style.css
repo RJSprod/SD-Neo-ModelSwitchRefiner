@@ -8560,160 +8560,17 @@
     }
 }
 
-/* The system prompt editor.
-   =========================================================================
-
-   Mini Paint's shape: the whole window, most of it the box being edited, a
-   line saying whose prompt it is and where it came from, and a row of
-   buttons. A native modal <dialog> for the customize dialog's reasons -- the
-   top layer, focus containment, Escape -- and the whole window at every
-   width, because a system prompt is a page of prose.
-
-   No rule here sets the dialog's `display`. An author `display` beats the
-   browser's `dialog:not([open]) { display: none }`, and a closed editor would
-   stay on the page; the column is the sheet inside it. */
-.forge-assistant-system {
-    box-sizing: border-box;
-    position: fixed;
-    /* Sized by its edges, not by 100vw: a viewport unit reaches under the
-       page's scrollbar, and the way out is in the top right. */
-    inset: 0;
-    z-index: 2100;              /* only without showModal: the top layer ignores it */
-    width: auto;
-    height: auto;
-    max-width: none;
-    max-height: none;
-    margin: 0;
-    padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: var(--background-fill-primary, Canvas);
-    color: var(--body-text-color, CanvasText);
-    overflow: hidden;
-}
-
-.forge-assistant-system::backdrop {
-    background: var(--background-fill-primary, Canvas);
-}
-
-.forge-assistant-system-sheet {
-    box-sizing: border-box;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    height: 100%;
-    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
-}
-
-.forge-assistant-system-top {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5em;
-}
-
-.forge-assistant-system-heading {
-    margin: 0;
-    font-size: 1.15em;
-    overflow-wrap: anywhere;
-}
-
-.forge-assistant-system-hint,
-.forge-assistant-system-state,
-.forge-assistant-system-note {
-    flex: 0 0 auto;
-    margin: 0;
-    font-size: 0.9em;
-}
-
-.forge-assistant-system-hint,
-.forge-assistant-system-state {
-    color: var(--body-text-color-subdued, inherit);
-}
-
-/* Mostly the box. It takes what the lines and the buttons leave, which on
-   any ordinary window is most of it; the floor is for a short one. 16px so a
-   phone does not zoom the page when the box is tapped. */
-.forge-assistant-system-text {
-    box-sizing: border-box;
-    flex: 1 1 auto;
-    width: 100%;
-    min-height: 30vh;
-    margin: 0;
-    padding: 10px 12px;
-    border: 1px solid var(--border-color-primary);
-    border-radius: 8px;
-    background: var(--input-background-fill, var(--background-fill-secondary, transparent));
-    color: var(--body-text-color, inherit);
-    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-    font-size: max(16px, 1em);
-    line-height: 1.5;
-    resize: none;
-    overflow-y: auto;
-}
-
-.forge-assistant-system-text:focus {
-    outline: 2px solid var(--color-accent, #2563eb);
-    outline-offset: -1px;
-}
-
-.forge-assistant-system-text:read-only {
-    opacity: 0.7;
-}
-
-.forge-assistant-system-note {
-    min-height: 1.4em;
-}
-
-.forge-assistant-system-note[data-kind="error"] {
-    color: var(--error-text-color, #dc2626);
-}
-
-.forge-assistant-system-foot {
-    display: flex;
-    flex: 0 0 auto;
-    flex-wrap: wrap;
-    gap: 0.5em;
-}
-
-.forge-assistant-system-action {
-    min-height: 44px;
-    min-width: 44px;
-    padding: 0.3em 1em;
-    border: 1px solid var(--border-color-primary);
-    border-radius: 999px;
-    background: var(--background-fill-secondary, transparent);
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-}
-
-.forge-assistant-system-action:disabled {
-    opacity: 0.5;
-    cursor: default;
-}
-
-/* The theme's primary button, fill and text as the pair it promises are
-   legible together -- the customize dialog's Save. */
-.forge-assistant-system-apply {
-    border-color: var(--button-primary-border-color, var(--color-accent, #2563eb));
-    background: var(--button-primary-background-fill, var(--color-accent, #2563eb));
-    color: var(--button-primary-text-color, white);
-    font-weight: 600;
-}
-
-/* Close at the far end, away from the button that keeps the edit. */
-.forge-assistant-system-foot .forge-assistant-system-close {
-    margin-left: auto;
-}
+/* The system prompt editor (javascript/forge_assistant_system.js) is drawn on
+   the pop-over every large editor shares since 2026-11-24 -- "these should
+   look the same" -- and has no rules of its own: see the mc-sheet section
+   (javascript/mc_sheet.js). */
 
 /* The message editor: one small dialog for editing a message, shared by LLM
    Studio's Conversation tab and the Forge Assistant's panel
    (javascript/mc_message_editor.js).
 
-   A native modal <dialog> for the system prompt editor's reasons -- the top
-   layer, focus containment, Escape -- and, unlike it, not the whole window:
+   A native modal <dialog> -- the top layer, focus containment, Escape -- and,
+   unlike the system prompt editors' pop-over, not most of the window:
    "not full screen, make it reasonable, and responsive to the browser
    available space so it also looks good on mobile". `left`, `top`, `width`
    and `max-height` are written by the script from the visual viewport, which
@@ -13344,6 +13201,405 @@ div.form > div.mc-lv-launch {
 .resize-handle-row:has(> #img2img_results) > .resize-handle {
     touch-action: none;
 }
+
+/* ==========================================================================
+   Model Chain -- the pop-over every large editor opens (javascript/mc_sheet.js)
+   ==========================================================================
+
+   Asked of Mini Paint NEO on 2026-11-23: "a pop up that covers 90% of the
+   screen, leaving a hint of [what is] behind it around the edge ... these
+   should look the same"; moved here the next day with the editors it draws
+   ("those are related LLM studio IMO"). The gear's editor on Forge's prompt
+   boxes, the writers' system prompt editor, the character's system prompt
+   editor, and Mini Paint's Send to WanGP prompt editor.
+
+   The layer is the visual viewport, written by the script (a phone's keyboard
+   makes it shorter, and the buttons must stay above it); the sheet is the
+   layer less 5% at each edge, and each sheet stacked over another a little
+   less again, so the one under it shows round it. On the dialog layer
+   (`--minipaint-dialog-layer`, Mini Paint's, 2000): over everything both
+   extensions draw. Every colour is the host's. */
+.mc-sheet-layer {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    z-index: calc(var(--minipaint-dialog-layer, 2000) + 10);
+    overscroll-behavior: contain;
+}
+.mc-sheet-layer [hidden] { display: none !important; }
+.mc-sheet-backdrop {
+    position: absolute;
+    inset: 0;
+    background: transparent;
+    background: color-mix(in srgb, #000000 50%, transparent);
+    touch-action: none;
+}
+.mc-sheet {
+    --mc-sheet-inset: 5%;
+    position: absolute;
+    top: var(--mc-sheet-inset);
+    bottom: var(--mc-sheet-inset);
+    left: var(--mc-sheet-inset);
+    right: var(--mc-sheet-inset);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    min-height: 0;
+    padding: 12px 16px 14px;
+    border-radius: var(--block-radius, 10px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    border-left: 4px solid var(--color-accent, #ff7c00);
+    background: var(--background-fill-primary, rgba(32, 32, 32, 0.98));
+    color: var(--body-text-color, inherit);
+    box-shadow: var(--shadow-drop-lg, 0 12px 40px rgba(0, 0, 0, 0.45));
+    font-size: 14px;
+    line-height: 1.45;
+    overflow: hidden;
+}
+.mc-sheet-layer[data-depth="1"] .mc-sheet { --mc-sheet-inset: 8%; }
+.mc-sheet-layer[data-depth="2"] .mc-sheet { --mc-sheet-inset: 11%; }
+.mc-sheet-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+}
+.mc-sheet-titles {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.mc-sheet-title { font-size: 16px; }
+.mc-sheet-sub {
+    color: var(--body-text-color-subdued, inherit);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.mc-sheet button {
+    font: inherit;
+    cursor: pointer;
+}
+.mc-sheet-close {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+}
+.mc-sheet-close:hover,
+.mc-sheet-close:focus-visible {
+    background: var(--button-secondary-background-fill-hover, rgba(127, 127, 127, 0.25));
+}
+.mc-sheet-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    container-type: inline-size;
+}
+.mc-sheet .mc-sheet-text {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 6em;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 10px 12px;
+    resize: none;
+    border-radius: var(--radius-md, 6px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    background: var(--input-background-fill, transparent);
+    color: var(--body-text-color, inherit);
+    font: inherit;
+    font-size: 15px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    outline: none;
+}
+.mc-sheet .mc-sheet-text:focus { border-color: var(--color-accent, #ff7c00); }
+.mc-sheet .mc-sheet-mono {
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-size: 13px;
+}
+/* A phone zooms the page into a box whose text is under 16px when it takes
+   the keyboard; the sheet is already as large as it can be. */
+@media (pointer: coarse) {
+    .mc-sheet .mc-sheet-text,
+    .mc-sheet .mc-sheet-mono { font-size: 16px; }
+}
+.mc-sheet-columns {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.mc-sheet-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.mc-sheet-info,
+.mc-sheet-state,
+.mc-sheet-availability {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 12px;
+}
+.mc-sheet-info[data-state="blocked"],
+.mc-sheet-availability[data-state="blocked"],
+.mc-sheet-availability[data-state="model"] { color: var(--error-text-color, inherit); }
+.mc-sheet-availability[data-state="ready"] { color: var(--body-text-color, inherit); }
+/* The enhancer's answer: under the box on a narrow sheet, beside it on a wide
+   one, never more than half the height it shares with the box. */
+.mc-sheet-result {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: 50%;
+    padding: 8px 10px;
+    box-sizing: border-box;
+    border-radius: var(--radius-md, 6px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    border-left: 3px solid var(--color-accent, #ff7c00);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+}
+.mc-sheet-result[data-state="failed"],
+.mc-sheet-result[data-state="lost"] { border-left-color: var(--error-text-color, #d9534f); }
+.mc-sheet-result[data-state="cancelled"] { border-left-color: var(--border-color-primary, rgba(127, 127, 127, 0.5)); }
+@container (min-width: 820px) {
+    .mc-sheet-columns.mc-sheet-with-result { flex-direction: row; }
+    .mc-sheet-with-result > .mc-sheet-editor,
+    .mc-sheet-with-result > .mc-sheet-result { flex: 1 1 0; min-width: 0; max-height: none; }
+}
+.mc-sheet-result-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+}
+.mc-sheet-result-meta {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 12px;
+}
+.mc-sheet-result-text {
+    flex: 1 1 auto;
+    min-height: 3em;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-user-select: text;
+    user-select: text;
+}
+.mc-sheet-result[data-state="running"] .mc-sheet-result-text { color: var(--body-text-color-subdued, inherit); }
+.mc-sheet-result-actions,
+.mc-sheet-foot-start,
+.mc-sheet-foot-end,
+.mc-sheet-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+.mc-sheet-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+.mc-sheet-foot-end { margin-left: auto; }
+.mc-sheet-result-actions button,
+.mc-sheet-foot button,
+.mc-sheet-confirm button {
+    min-height: 36px;
+    padding: 0 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, inherit);
+}
+.mc-sheet-result-actions button:hover,
+.mc-sheet-foot button:hover,
+.mc-sheet-confirm button:hover {
+    background: var(--button-secondary-background-fill-hover, rgba(127, 127, 127, 0.25));
+}
+.mc-sheet-result-actions button { min-height: 32px; padding: 0 10px; }
+/* The sheet's main buttons: the accent's line over a wash of it, in the
+   page's own text colour - readable whatever the theme does with its primary
+   button's colours (a white block under one theme's night mode, orange on
+   orange in Gradio's light default). */
+.mc-sheet {
+    --mc-sheet-primary: var(--background-fill-secondary, transparent);
+    --mc-sheet-primary-hover: var(--button-secondary-background-fill-hover, rgba(127, 127, 127, 0.25));
+}
+/* Mixed on the sheet, not on the root: the accent a dark mode sets lower
+   down the page is the one the mix has to start from. */
+@supports (color: color-mix(in srgb, red 50%, transparent)) {
+    .mc-sheet {
+        --mc-sheet-primary: color-mix(in srgb, var(--color-accent, #ff7c00) 22%, transparent);
+        --mc-sheet-primary-hover: color-mix(in srgb, var(--color-accent, #ff7c00) 34%, transparent);
+    }
+}
+.mc-sheet .mc-sheet-done,
+.mc-sheet .mc-sheet-save,
+.mc-sheet .mc-sheet-use {
+    background: var(--mc-sheet-primary);
+    border-color: var(--color-accent, #ff7c00);
+    color: var(--body-text-color, inherit);
+    font-weight: 600;
+}
+.mc-sheet .mc-sheet-done:hover,
+.mc-sheet .mc-sheet-save:hover,
+.mc-sheet .mc-sheet-use:hover {
+    background: var(--mc-sheet-primary-hover);
+}
+.mc-sheet .mc-sheet-enhance {
+    border-color: var(--color-accent, #ff7c00);
+    font-weight: 600;
+}
+.mc-sheet button[disabled] {
+    opacity: 0.5;
+    cursor: default;
+}
+.mc-sheet .mc-sheet-save.mc-sheet-unsaved { box-shadow: 0 0 0 2px var(--border-color-accent-subdued, rgba(255, 124, 0, 0.35)); }
+.mc-sheet-message {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+    font-size: 13px;
+}
+.mc-sheet-message-failure {
+    border-left: 3px solid var(--error-text-color, #d9534f);
+    color: var(--error-text-color, inherit);
+}
+.mc-sheet-confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    border-left: 3px solid var(--error-text-color, #d9534f);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+}
+.mc-sheet-confirm-text { flex: 1 1 220px; min-width: 0; }
+.mc-sheet-picks { align-items: flex-end; }
+.mc-sheet-pick {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1 1 200px;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--body-text-color-subdued, inherit);
+}
+.mc-sheet-pick select {
+    min-height: 34px;
+    padding: 0 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    background: var(--input-background-fill, transparent);
+    color: var(--body-text-color, inherit);
+    font: inherit;
+    font-size: 14px;
+}
+/* A drawn switch: a theme that redraws every native checkbox (the Lobe
+   theme does, with `appearance: none !important`) has nothing to reach. */
+.mc-sheet .mc-sheet-switch {
+    position: relative;
+    flex: 0 0 auto;
+    width: 40px;
+    height: 22px;
+    min-width: 40px;
+    padding: 0;
+    border-radius: 11px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.5));
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.25));
+}
+.mc-sheet-switch-track {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--body-text-color-subdued, #aaa);
+    transition: transform 0.15s ease;
+}
+.mc-sheet .mc-sheet-switch-on {
+    background: var(--color-accent, #ff7c00);
+    border-color: transparent;
+}
+.mc-sheet-switch-on .mc-sheet-switch-track {
+    transform: translateX(18px);
+    background: var(--button-primary-text-color, #fff);
+}
+@media (prefers-reduced-motion: reduce) {
+    .mc-sheet-switch-track { transition: none; }
+}
+.mc-sheet-busy .mc-sheet-text { opacity: 0.75; }
+@media (max-width: 480px) {
+    .mc-sheet { padding: 10px 10px 12px; gap: 8px; }
+}
+
+/* The gear on Forge's prompt boxes: in the box's top right corner, placed by
+   the script clear of a scroll bar and of Forge's token counter, with room
+   kept under it so no word sits beneath it. */
+.mc-has-gear { position: relative; }
+.mc-prompt-gear {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    padding: 0;
+    margin: 0;
+    border-radius: 6px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    background: var(--background-fill-primary, rgba(32, 32, 32, 0.9));
+    color: var(--body-text-color-subdued, inherit);
+    opacity: 0.8;
+    cursor: pointer;
+}
+.mc-prompt-gear svg { width: 16px; height: 16px; }
+.mc-prompt-gear:hover,
+.mc-prompt-gear:focus-visible {
+    opacity: 1;
+    color: var(--color-accent, #ff7c00);
+    border-color: var(--color-accent, #ff7c00);
+    outline: none;
+}
+.mc-has-gear textarea.mc-prompt-gear-room { padding-right: 40px !important; }
 
 /* ==========================================================================
    Voice Box

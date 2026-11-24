@@ -5589,3 +5589,42 @@ three checks in `tests/live/llm_studio_conversation_live.py` on real Gradio
 tests were tightened (the file read raw, the cache identity against the formula
 before the change, a switch that is not true or false). Not run against a real
 llama-server, with a real vector, or on the user's machine.
+
+## 52. The writers' system prompts, kept here and edited from the MiniMax workspace (24 November 2026)
+
+Asked of the system prompt editor Mini Paint NEO drew on 23 November: "those are
+related LLM studio IMO ... should it be removed from mini paint and put in
+modelswitchrefiner?" It was. Until then an edit to a writer's instructions lived in
+Mini Paint and reached Mini Paint's presses alone: this tab's MiniMax H3 workspace
+called the same writer (`mc_llm_sessions.minimax`) with no instructions of its own,
+so it wrote under the defaults while the Clipboard wrote under the edit.
+
+**One set of instructions for every door.** `mc_llm_instructions.py` keeps the
+user's own instructions for the six sets -- FL2VA and Ref2VA, and the one LTX set
+for 2.3 and 2.5, each with a picture and without -- in `writer-instructions.json`
+in the LLM data folder, and `mc_llm_sessions.minimax` and `ltx` read the set a run
+is written under when the run starts (`_instructions`): a request's own
+`system_prompt` first (the external API's, docs/21 §6), then the saved set, then the
+default. The console line says *under saved instructions*, never the text. Saving
+the shipped text unchanged keeps no override; blank and over-long text is refused,
+never cut. The external API answers for them (`instructions`, `save_instructions`,
+`restore_instructions`, `adopt_instructions`, `capabilities()["keeps_instructions"]`;
+docs/21 §6.1), and Mini Paint hands over what it kept, once, stops sending its own,
+and opens the same editor from its Clipboard tab and its Send to WanGP prompt
+editor.
+
+**The editor.** The workspace's inspector has **System prompt** under *Variant*: it
+opens `mcSheet.systemPrompt` (`javascript/mc_sheet.js`, the pop-over every large
+editor here shares) on the variant chosen, with a picture's instructions when the
+reference frame holds one. A press is the browser's alone (`OPEN_SYSTEM_PROMPT`, no
+Gradio round trip); the editor reads and writes over
+`POST /model-chain/llm/instructions` (`mc_llm_instructions_api.py`: `describe`,
+`save`, `restore`), behind the page's own origin and the conversation routes' key.
+It offers **Writer** and **Instructions used** to move between the sets, **Save
+override**, **Restore default**, **Reload** and **Close**, and asks about an
+unsaved change before it is thrown away or another set is shown.
+
+`tests/test_llm_instructions.py` holds the store, the runs (the workspace's own
+through `_enhance`, an external request through the queue), the API, the route on
+a real FastAPI app where there is one, and the button; `tests/test_sheet_layout.py`
+the editor in Chromium against the route's own answers.

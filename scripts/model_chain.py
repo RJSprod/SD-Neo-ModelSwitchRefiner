@@ -31,6 +31,7 @@ import mc_hint
 import mc_infotext
 import mc_literal_report
 import mc_llm_conversation_api
+import mc_llm_instructions_api
 import mc_llm_conversation_startup
 import mc_llm_paths
 import mc_llm_runtime
@@ -4516,6 +4517,10 @@ try:
     # only transport it has, and there is no FastAPI app to add it to until the
     # host has one.
     script_callbacks.on_app_started(mc_llm_conversation_api.install)
+    # The writers' instructions, for the system prompt editor every door shares
+    # (mcSheet.systemPrompt): LLM Studio's MiniMax workspace, Mini Paint's
+    # Clipboard and its Send to WanGP popup (mc_llm_instructions).
+    script_callbacks.on_app_started(mc_llm_instructions_api.install)
     script_callbacks.on_app_started(mc_llm_conversation_startup.on_app_started)
     # The theme's palette is the host's theme object, read when the page is
     # built, so it is installed just before that -- and the user's Lobe

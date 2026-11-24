@@ -159,9 +159,11 @@ def submit_minimax(prompt: str, *, variant: str = "", first_frame=None, last_fra
     ``PIL.Image``, a path, raw image bytes, or a ``data:`` URL. Any combination
     may be supplied and exactly one is captioned -- see :func:`_primary`.
 
-    ``system_prompt`` replaces this variant's vendored instructions for this one
+    ``system_prompt`` replaces this variant's instructions for this one
     request. ``@`` and ``@@`` in the prompt text still mean what they mean, so a
-    caller can append to its own override.
+    caller can append to its own override. Without it the request runs under the
+    instructions the user saved for this variant, if any (:func:`instructions`,
+    the system prompt editor's), and the vendored ones otherwise.
 
     ``seed`` defaults to a fresh random one per request, matching the panel and
     matching WanGP's ``prompt_enhancer_randomize_seed``. Pass an integer to
@@ -240,7 +242,9 @@ def submit_ltx(prompt: str, *, first_frame=None, system_prompt: str | None = Non
     ``system_prompt`` replaces the writer's instructions for this request --
     the one with a first frame or the one without, whichever it would have
     used -- and ``@`` / ``@@`` in the prompt text still append to or replace
-    it, as for MiniMax. ``seed`` is drawn per request unless given.
+    it, as for MiniMax. Without it the request runs under the instructions the
+    user saved, if any, as a MiniMax one does. ``seed`` is drawn per request
+    unless given.
 
     ``model`` is the LTX model the prompt is for: ``"ltx23"`` (the default, and
     what every caller written before LTX 2.5 means) or ``"ltx25"``. Both are
@@ -527,6 +531,78 @@ def system_prompts() -> dict:
     return found
 
 
+def _set_name(variant: str) -> str:
+    """The instruction set ``variant`` is written under, resolved the way
+    :func:`system_prompt` resolves it: either LTX name is the LTX set, and
+    anything else is a MiniMax variant."""
+    chosen = str(variant or "").strip().casefold()
+    if chosen in LTX_MODELS:
+        return LTX
+    from prompt_master.minimax import enhancer
+
+    return enhancer.variant_of(chosen)
+
+
+def _refused(error) -> Rejected:
+    """A store's refusal as the API's, with the store's code."""
+    return Rejected(str(getattr(error, "reason", error)), str(getattr(error, "code", "rejected")))
+
+
+def instructions(variant: str = "", *, has_image: bool = False) -> dict:
+    """The instructions a request for ``variant`` runs under now.
+
+    The user's saved ones -- the system prompt editor's -- when there are
+    some, and the writer's default otherwise: ``{"variant", "mode", "text",
+    "source", "default", "label"}``, ``source`` being ``"override"`` or
+    ``"default"`` and ``variant`` the set's name (LTX 2.5 answers as
+    ``"ltx23"``, whose instructions it runs under). A request that brings its
+    own ``system_prompt`` runs under that instead, for itself alone.
+    """
+    import mc_llm_instructions
+
+    found = mc_llm_instructions.view(_set_name(variant), "image" if has_image else "text")
+    return {key: found[key] for key in ("variant", "mode", "text", "source", "default", "label")}
+
+
+def save_instructions(variant: str, text: str, *, has_image: bool = False) -> dict:
+    """Keep ``text`` as the instructions for ``variant`` from now on, for every
+    request that brings none of its own. Answers as :func:`instructions`.
+
+    Raises :class:`Rejected`: ``empty_system_prompt`` for blank text (use
+    :func:`restore_instructions`), ``system_prompt_too_long`` past
+    ``mc_llm_instructions.MAX_LENGTH`` characters -- refused, never cut. The
+    default saved unchanged is no override, and answers as the default.
+    """
+    import mc_llm_instructions
+
+    try:
+        mc_llm_instructions.save(_set_name(variant), "image" if has_image else "text", text)
+    except mc_llm_instructions.Refused as error:
+        raise _refused(error) from None
+    return instructions(variant, has_image=has_image)
+
+
+def restore_instructions(variant: str, *, has_image: bool = False) -> bool:
+    """Forget the instructions saved for ``variant``; True when there were some."""
+    import mc_llm_instructions
+
+    return mc_llm_instructions.restore(_set_name(variant), "image" if has_image else "text")
+
+
+def adopt_instructions(sets: dict, *, origin: str = "") -> dict:
+    """Take over instructions a caller kept itself, once: Mini Paint NEO's, which
+    kept its own until this extension kept them.
+
+    ``sets`` is ``{variant: {"text": ..., "image": ...}}``, either LTX name for
+    the LTX set. A set already saved here is left as it is -- an edit made in
+    this extension's editor is newer than anything handed over -- and so is
+    one that is the default. Answers ``{"adopted": n, "kept": n, "refused": n}``.
+    """
+    import mc_llm_instructions
+
+    return mc_llm_instructions.adopt(sets, origin=str(origin or "")[:80])
+
+
 def capabilities() -> dict:
     """What this installation can do right now, so a caller can check first.
 
@@ -540,6 +616,10 @@ def capabilities() -> dict:
         "api_version": API_VERSION,
         "kinds": list(jobs.KINDS),
         "ltx_models": list(LTX_MODELS),
+        # The user's instructions are kept here and used for every request that
+        # brings none (:func:`instructions`): a caller that kept its own stops
+        # sending them, and hands them over once (:func:`adopt_instructions`).
+        "keeps_instructions": True,
         "enabled": _enabled(),
         "variants": [value for value, _ in variants()],
         "slots": list(SLOTS),
