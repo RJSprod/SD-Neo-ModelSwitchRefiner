@@ -6,31 +6,37 @@
 // for that character. Same as with flyout."
 //
 // One editor with two ways in: the flyout's ⋯ menu and LLM Studio's character
-// screen. It is Mini Paint's system prompt editor in shape -- the box is most
-// of the window, a line under it says whose prompt this is and where it came
-// from, and four buttons: Apply override, Restore default, Reload, Close --
-// without the model and enhancer choices, which are about video prompts. What
-// it edits is the character's `system` field, the same one LLM Studio's
-// override box writes: one prompt per character, two places to change it.
+// screen. What it edits is the character's `system` field, the same one LLM
+// Studio's override box writes: one prompt per character, two places to change
+// it.
+//
+// Since 2026-11-24 it is drawn on the pop-over every large editor shares
+// (javascript/mc_sheet.js): "Lets make both the system prompt editors and this
+// wan2gp pop over be like a pop up that covers 90% of the screen ... these
+// should look the same". So it is the writers' system prompt editor in shape --
+// the box is 90% of the window with the page dimmed round it, a line under the
+// box says whose prompt this is and where it came from, Restore default and
+// Reload on the left, Close and Save override on the right -- without the
+// writer and picture choices, which are about video prompts.
 //
 // Three things it will not do.
 //
 // *Freeze the default by accident.* It opens on the prompt the character is
 // actually given, which for most characters is built from their Context and
-// the persona. Applied untouched, that is not an override -- the server keeps
+// the persona. Saved untouched, that is not an override -- the server keeps
 // none and says so -- because a frozen copy stops following either, and
 // nothing on screen would ever say it had.
 //
-// *Lose an edit quietly.* Close, Escape and Reload ask first while the box
-// holds something that has not been applied. Apply and Restore are not offered
-// until the prompt has been read: an empty box applied is "go back to the
-// default", and a read that failed must not become a press that wipes an
+// *Lose an edit quietly.* Close, Escape, the dimmed edge and Reload ask first
+// while the box holds something that has not been saved -- keep editing,
+// discard or save, the question the writers' editor asks. Save and Restore are
+// not offered until the prompt has been read: an empty box saved is "go back to
+// the default", and a read that failed must not become a press that wipes an
 // override.
 //
-// *Vanish under focus mode.* It is a native modal <dialog> -- the top layer,
-// above focus mode, the panel and every z-index on the page -- appended to the
-// body, and marked role="dialog" aria-modal="true" out loud as well: focus
-// mode's rule spares whatever says it is a dialog, wherever it ends up.
+// *Vanish under focus mode.* The sheet's layer is a dialog (role="dialog",
+// aria-modal) on the body, on the dialog layer above focus mode and the panel:
+// focus mode's rule spares whatever says it is a dialog, wherever it ends up.
 
 (function () {
     "use strict";
@@ -43,7 +49,7 @@
     const STUDIO_NAME = "mc-llm-chat-name";
     const STUDIO_SYSTEM = "mc-llm-chat-system";
 
-    const HEADING_ID = "forge-assistant-system-heading";
+    const SHEET_NAME = "character-prompt";
 
     function make(tag, className, text) {
         const node = document.createElement(tag);
@@ -95,9 +101,9 @@
     }
 
     function Editor() {
-        this.dialog = null;
+        this.sheet = null;
         this.character = "";
-        // What the box held when it was last read or applied, and where that
+        // What the box held when it was last read or saved, and where that
         // came from. `null` until a read has answered.
         this.loaded = null;
         this.busy = false;
@@ -106,41 +112,63 @@
         this.controls = {};
     }
 
+    /** A sheet closed from outside -- Mini Paint closes every sheet when its
+     *  popup goes, say -- is closed here too: the sheet says so itself. */
     Editor.prototype.isOpen = function () {
-        return !!(this.dialog && this.dialog.open);
+        return !!(this.sheet && !this.sheet.closed);
     };
 
-    /** Whether the box holds something that has not been applied. */
+    /** Whether the box holds something that has not been saved. */
     Editor.prototype.dirty = function () {
         const box = this.controls.text;
         return !!(this.loaded && box && box.value !== this.loaded.text);
     };
 
-    /** True when there is nothing to lose, or the person said to lose it. */
-    Editor.prototype.discardable = function () {
-        if (!this.dirty()) return true;
-        if (typeof window.confirm !== "function") return true;
-        return window.confirm("Discard your changes to " + this.character
-                              + "’s system prompt?");
+    /**
+     * Ask what to do with an unsaved edit, then do `then` unless the answer
+     * was to keep editing (or a save asked for failed). Resolves with what
+     * `then` answered, or false. Nothing to lose runs it at once.
+     */
+    Editor.prototype.settleEdit = function (then) {
+        if (!this.dirty() || !this.isOpen()) return Promise.resolve(then());
+        const who = this.character;
+        return this.sheet.ask("Your change to " + who + "’s system prompt is not saved.",
+                              {keep: "Keep editing", discard: "Discard", save: "Save"})
+            .then((choice) => {
+                if (choice === "keep") {
+                    this.focusText(false);
+                    return false;
+                }
+                if (choice === "discard") return then();
+                return this.apply().then((ok) => (ok ? then() : false));
+            });
     };
 
     Editor.prototype.open = function (character) {
         const who = String(character || "").trim();
-        if (!this.dialog) this.build();
+        if (!this.controls.text) this.build();
         if (this.isOpen()) {
             // Already there: an edit in progress is not thrown away by a
             // second press on the way in.
             if (same(who, this.character)) return true;
-            if (!this.discardable()) return false;
+            if (this.dirty()) {
+                this.settleEdit(() => this.switchTo(who));
+                return false;
+            }
+            return this.switchTo(who);
         }
+        if (!this.show()) return false;
+        return this.switchTo(who);
+    };
+
+    /** Onto a character, in the sheet that is open. */
+    Editor.prototype.switchTo = function (who) {
         this.character = who;
         this.loaded = null;
-        const c = this.controls;
         this.title();
-        c.text.value = "";
+        this.controls.text.value = "";
         this.state("", "");
         this.note("", "info");
-        this.show();
         if (!who) {
             this.note("Choose a character first.", "warn");
             this.draw();
@@ -154,76 +182,88 @@
     Editor.prototype.title = function () {
         const who = this.character;
         const c = this.controls;
-        c.heading.textContent = who ? "System prompt — " + who : "System prompt";
+        if (this.sheet) this.sheet.setTitle(who ? "System prompt — " + who : "System prompt", "Character");
         c.hint.textContent = who
             ? "What " + who + " is told before every conversation, in LLM Studio and in "
               + "the Forge Assistant alike."
             : "";
     };
 
+    /** The sheet, opened, with the controls in it. */
     Editor.prototype.show = function () {
-        const dialog = this.dialog;
-        if (this.isOpen()) return;
-        this.fit();
-        try {
-            if (typeof dialog.showModal === "function") dialog.showModal();
-            else dialog.setAttribute("open", "");
-        } catch (error) {
-            dialog.setAttribute("open", "");
+        const api = window.mcSheet;
+        if (!api || typeof api.open !== "function") {
+            this.note("The editor is not on this page. Reload it.", "error");
+            return false;
         }
-        this.follow(true);
+        const c = this.controls;
+        const sheet = api.open({
+            name: SHEET_NAME,
+            title: "System prompt",
+            subtitle: "Character",
+            kind: "system",
+            request: () => this.close(false),
+            submit: () => this.apply(),
+        });
+        this.sheet = sheet;
+        c.heading = sheet.title;
+        c.dismiss = sheet.cross;
+        [c.hint, c.text, c.state].forEach((node) => sheet.body.appendChild(node));
+        c.note = sheet.message;
+        sheet.start.appendChild(c.restore);
+        sheet.start.appendChild(c.reload);
+        sheet.end.appendChild(c.close);
+        sheet.end.appendChild(c.apply);
+        this.focusText(false);
+        return true;
     };
 
-    /** Fill what is actually on the screen.
-     *
-     * `position: fixed` -- the top layer's too -- is placed in the layout
-     * viewport, and on a phone that is not the screen whenever the page is
-     * wider than it is: the browser widens the layout viewport to the page.
-     * Filling that, the editor ran off the right-hand edge with its buttons
-     * below the fold (Chromium at 412px, a page 508px wide: a layout viewport
-     * of 508 by 1129). The visual viewport is what is on the glass, and it is
-     * also what shrinks when a phone's keyboard opens, so the buttons stay
-     * above the keyboard while the box is being typed into.
-     */
-    Editor.prototype.fit = function () {
-        const view = window.visualViewport;
-        const style = this.dialog && this.dialog.style;
-        if (!style || !view || !(view.width > 0) || !(view.height > 0)) return;
-        style.left = Math.round(view.offsetLeft || 0) + "px";
-        style.top = Math.round(view.offsetTop || 0) + "px";
-        style.width = Math.round(view.width) + "px";
-        style.height = Math.round(view.height) + "px";
-        style.right = "auto";
-        style.bottom = "auto";
+    /** The cursor in the box, inside the press that opened it, so a phone
+     *  raises its keyboard; at the start once a prompt is in it. */
+    Editor.prototype.focusText = function (toStart) {
+        const box = this.controls.text;
+        try {
+            box.focus({preventScroll: true});
+            if (toStart && typeof box.setSelectionRange === "function") {
+                box.setSelectionRange(0, 0);
+                box.scrollTop = 0;
+            }
+        } catch (error) {
+            // Not worth an exception.
+        }
     };
 
-    /** Refit while open: a keyboard, a rotation, a pinch. */
-    Editor.prototype.follow = function (on) {
-        const view = window.visualViewport;
-        if (!view || typeof view.addEventListener !== "function") return;
-        if (!this._refit) this._refit = () => this.fit();
-        const verb = on ? "addEventListener" : "removeEventListener";
-        view[verb]("resize", this._refit);
-        view[verb]("scroll", this._refit);
-    };
-
-    /** Put the editor away. `force` skips the question about unapplied text. */
-    Editor.prototype.close = function (force) {
-        if (!this.isOpen()) return true;
-        if (!force && !this.discardable()) return false;
-        // Answers still on their way are not drawn; a save still on its way
-        // still happens -- the server has it -- and still reaches LLM Studio.
+    /** Let go of the sheet as it is put away: answers still on their way are
+     *  not drawn; a save still on its way still happens -- the server has it
+     *  -- and still reaches LLM Studio. A sheet put away by anything else
+     *  reads as shut through `isOpen`, and the next open starts a read whose
+     *  turn drops any older answer. */
+    Editor.prototype.gone = function (sheet) {
+        if (this.sheet !== sheet) return;
         this.turn += 1;
         this.loaded = null;
-        this.follow(false);
-        if (typeof this.dialog.close === "function") this.dialog.close();
-        else this.dialog.removeAttribute("open");
+        this.busy = false;
+        this.sheet = null;
+    };
+
+    /** Put the editor away. `force` skips the question about an unsaved edit.
+     *  Answers whether it went now; with a question on screen, it is the
+     *  answer that decides. */
+    Editor.prototype.close = function (force) {
+        if (!this.isOpen()) return true;
+        if (!force && this.dirty()) {
+            this.settleEdit(() => this.close(true));
+            return false;
+        }
+        const sheet = this.sheet;
+        this.gone(sheet);
+        sheet.close("close");
         return true;
     };
 
     Editor.prototype.reload = function () {
-        if (!this.character || !this.discardable()) return Promise.resolve(false);
-        return this.read();
+        if (!this.character || !this.isOpen()) return Promise.resolve(false);
+        return this.settleEdit(() => this.read());
     };
 
     Editor.prototype.read = function () {
@@ -238,6 +278,7 @@
             if (turn !== this.turn) return false;
             this.take(view);
             this.note("", "info");
+            this.focusText(true);
             return this.settle(turn, true);
         }, (error) => this.settle(turn, false,
                                   messageOf(error, "The system prompt could not be read.")));
@@ -289,7 +330,7 @@
     };
 
     /** The line under the box: whose prompt this is, and where it came from.
-     *  Mini Paint's two sentences, with the name in them. */
+     *  The writers' editor's two sentences, with the name in them. */
     Editor.prototype.describe = function () {
         const loaded = this.loaded;
         const who = this.character;
@@ -298,7 +339,7 @@
             this.state("Override saved", " for " + who + ". Restore default forgets it.");
         } else {
             this.state("Default", " for " + who + ", built from " + who + "’s Context "
-                       + "and your persona. Edit and Apply override to replace it.");
+                       + "and your persona. Edit it and save an override to replace it.");
         }
     };
 
@@ -307,10 +348,13 @@
         this.controls.rest.textContent = rest || "";
     };
 
+    /** The sheet's message line, or nothing while no sheet is open. `kind` is
+     *  kept on it for the checks: info, warn or error. */
     Editor.prototype.note = function (text, kind) {
-        const note = this.controls.note;
-        note.textContent = text || "";
-        note.dataset.kind = kind || "info";
+        const sheet = this.sheet;
+        if (!sheet) return;
+        sheet.say(text || "", kind === "error" || kind === "warn");
+        if (sheet.message) sheet.message.dataset.kind = kind || "info";
     };
 
     /** Everything that follows from the state: what can be pressed, and the
@@ -322,95 +366,56 @@
         c.apply.disabled = !ready;
         c.restore.disabled = !ready;
         c.reload.disabled = this.busy || !this.character;
-        if (this.dialog) this.dialog.dataset.dirty = String(this.dirty());
+        if (this.sheet) this.sheet.dialog.dataset.dirty = String(this.dirty());
         this.describe();
     };
 
-    const UNAPPLIED = "Not applied yet.";
+    const UNSAVED = "Not saved yet.";
 
-    /** Typing. The Apply button is what keeps it, and the line says so. */
+    /** Typing. Save override is what keeps it, and the line says so. */
     Editor.prototype.edited = function () {
         const dirty = this.dirty();
-        if (this.dialog) this.dialog.dataset.dirty = String(dirty);
+        if (this.sheet) this.sheet.dialog.dataset.dirty = String(dirty);
+        this.controls.apply.classList.toggle("mc-sheet-unsaved", dirty);
         const note = this.controls.note;
-        if (dirty && note.dataset.kind !== "error") this.note(UNAPPLIED, "info");
-        else if (!dirty && note.textContent === UNAPPLIED) this.note("", "info");
+        const kind = note && note.dataset ? note.dataset.kind : "";
+        if (dirty && kind !== "error") this.note(UNSAVED, "info");
+        else if (!dirty && note && note.textContent === UNSAVED) this.note("", "info");
     };
 
+    /** The controls, once; each opening puts them in its sheet. */
     Editor.prototype.build = function () {
         const c = this.controls;
-        const dialog = make("dialog", "forge-assistant-system");
-        // Said out loud rather than left implicit in the tag: focus mode hides
-        // what sits beside the focused workspace unless it carries one of
-        // these.
-        dialog.setAttribute("role", "dialog");
-        dialog.setAttribute("aria-modal", "true");
-        dialog.setAttribute("aria-labelledby", HEADING_ID);
-        const sheet = make("div", "forge-assistant-system-sheet");
-        dialog.appendChild(sheet);
-
-        // The way out first, so a keyboard -- and a phone's, which would open
-        // over the text -- does not land in the box the moment it opens.
-        const top = make("div", "forge-assistant-system-top");
-        const heading = make("h2", "forge-assistant-system-heading", "System prompt");
-        heading.id = HEADING_ID;
-        const dismiss = button("forge-assistant-icon-button forge-assistant-system-dismiss",
-                               "×", "Close");
-        dismiss.setAttribute("aria-label", "Close");
-        top.appendChild(heading);
-        top.appendChild(dismiss);
-        sheet.appendChild(top);
-
-        const hint = make("p", "forge-assistant-system-hint");
-        sheet.appendChild(hint);
-
-        const text = make("textarea", "forge-assistant-system-text");
-        text.setAttribute("aria-labelledby", HEADING_ID);
+        const hint = make("div", "mc-sheet-availability");
+        const text = make("textarea", "mc-sheet-text mc-sheet-mono");
+        text.setAttribute("aria-label", "System prompt");
         text.spellcheck = true;
         text.addEventListener("input", () => this.edited());
-        sheet.appendChild(text);
 
-        // Mini Paint's line: the first words bold, the rest plain. Names go
-        // in as text, never as markup -- a character is called what its file
-        // says, and a file can say anything.
-        const state = make("p", "forge-assistant-system-state");
-        const lead = make("strong", "forge-assistant-system-lead");
-        const rest = make("span", "forge-assistant-system-rest");
+        // The line under the box: the first words bold, the rest plain. Names
+        // go in as text, never as markup -- a character is called what its
+        // file says, and a file can say anything.
+        const state = make("div", "mc-sheet-state");
+        const lead = make("strong", "");
+        const rest = make("span", "");
         state.appendChild(lead);
         state.appendChild(rest);
-        sheet.appendChild(state);
-        const note = make("p", "forge-assistant-system-note");
-        note.setAttribute("role", "status");
-        sheet.appendChild(note);
 
-        const foot = make("div", "forge-assistant-system-foot");
-        const apply = button("forge-assistant-system-action forge-assistant-system-apply",
-                             "Apply override", "Save this as the character’s own prompt");
-        const restore = button("forge-assistant-system-action forge-assistant-system-restore",
-                               "Restore default",
+        const restore = button("mc-sheet-restore", "Restore default",
                                "Forget the override and go back to the built prompt");
-        const reload = button("forge-assistant-system-action forge-assistant-system-reload",
-                              "Reload", "Read the saved prompt again");
-        const close = button("forge-assistant-system-action forge-assistant-system-close",
-                             "Close");
+        const reload = button("mc-sheet-reload", "Reload",
+                              "Read the saved prompt again");
+        const close = button("mc-sheet-close-text", "Close",
+                             "Close (Escape)");
+        const apply = button("mc-sheet-save", "Save override",
+                             "Save this as the character’s own prompt (Ctrl+Enter)");
         apply.addEventListener("click", () => this.apply());
         restore.addEventListener("click", () => this.restore());
         reload.addEventListener("click", () => this.reload());
         close.addEventListener("click", () => this.close(false));
-        dismiss.addEventListener("click", () => this.close(false));
-        [apply, restore, reload, close].forEach((node) => foot.appendChild(node));
-        sheet.appendChild(foot);
 
-        // Escape is the browser's `cancel`. Taken over so it can ask first.
-        dialog.addEventListener("cancel", (event) => {
-            event.preventDefault();
-            this.close(false);
-        });
-
-        Object.assign(c, {heading, hint, text, state, lead, rest, note, apply, restore,
-                          reload, close, dismiss});
-        document.body.appendChild(dialog);
-        this.dialog = dialog;
+        Object.assign(c, {hint, text, state, lead, rest, apply, restore, reload, close,
+                          heading: null, dismiss: null, note: null});
     };
 
     let editor = null;

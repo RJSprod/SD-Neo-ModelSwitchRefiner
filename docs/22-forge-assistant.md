@@ -4962,3 +4962,35 @@ double click whose first click was that tap swaps nothing and lets no reset of
 Forge's run, and a touch on the divider while the panel is open (with Tap Outside to
 Close on) is kept from the swap and from Forge's divider alike
 (`TestWithTheAssistantsPanelOpen`).
+
+## 3.58 The system prompt editor on the shared pop-over, and the panel under a sheet (2026-11-24)
+
+The user, of the system prompt editor and the gear Mini Paint NEO had drawn the
+day before: "those are related LLM studio IMO ... should it be removed from mini
+paint and put in modelswitchrefiner?" The pop-over moved here
+(`javascript/mc_sheet.js`, `window.mcSheet`), and with it the writers' system
+prompt editor, the instructions it edits (`mc_llm_instructions.py`; docs/21 §6.1)
+and the gear on Forge's prompt boxes (the README, *The pop-over and the gear*).
+The character's system prompt editor (the third round's full-page editor,
+`javascript/forge_assistant_system.js`) is drawn on the same sheet now, so the two
+system prompt editors look the same, as asked the day before ("make both the system
+prompt editors ... be like a pop up that covers 90% of the screen ... these should
+look the same"): 90% of the window, the page dimmed round it, the cursor in the box,
+Restore default and Reload on the left and Close and **Save override** on the right
+(it said *Apply override*), and an unsaved edit asked about in the sheet -- Keep
+editing, Discard, Save -- where it was the browser's `confirm`. Its rules are kept:
+it opens on what the character is told, saves nothing it has not read, and tells
+LLM Studio's override box about a save (`syncStudio`). Its old dialog's styles are
+gone (`tests/test_assistant_v3_js.py`, `TestTheEditorIsNinetyPercentOfTheWindow`).
+
+Two things in the panel follow from a sheet. A sheet is announced with
+`minipaint:overlay` like every dialog here, carrying `sheet: true`, and `yieldTo`
+does not put the panel away for one: a sheet covers and dims the whole window, the
+panel with it, and the gear's editor is opened from inside the panel when the
+settings column is docked, which has to be there when the editor closes. And the
+sheet's layer is itself a dialog (`role="dialog"`, `aria-modal`), so a tap on its
+dimmed edge is not a tap outside the panel (`NOT_OUTSIDE`) and focus mode's path
+rule spares it. `documentKey` leaves Escape to an open sheet, which takes it on the
+window first anyway. `TestTheGearInTheAssistantsDock` in `tests/test_sheet_layout.py`
+holds both: the gear pressed in the docked column, the edge tapped, the panel still
+open and the text in the box.

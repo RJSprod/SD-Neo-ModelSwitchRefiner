@@ -496,18 +496,46 @@ class TestANewThreadFromTheMenu:
 SYSTEM_JS = SHELL.parent / "forge_assistant_system.js"
 
 EDITOR = """
-// Dialogs that open and close the way the browser's do, a store that answers
-// the two routes as the scenario says, and a confirm that says what it is told.
-const created = document.createElement;
-document.createElement = (tag) => {
-    const node = created(tag);
-    if (node.tagName === "DIALOG") {
-        node.open = false;
-        node.showModal = () => { node.open = true; node.modal = true; };
-        node.close = () => { node.open = false; };
-    }
-    return node;
-};
+// The pop-over the editor is drawn on (javascript/mc_sheet.js), as its contract
+// says: a sheet with a title, a body, the two halves of a foot, a message line
+// and a cross, which closes as asked and asks what the scenario answers
+// (`answers`, one per question; keep editing once they run out). The real one
+// is checked in Chromium (test_sheet_layout.py). A store that answers the two
+// routes as the scenario says.
+const sheets = [];
+const asked = [];
+let answers = [];
+function stubSheet(spec) {
+    const make = (tag) => document.createElement(tag);
+    const sheet = {spec, closed: false, title: make("b"), subtitle: make("small"),
+                   body: make("div"), start: make("div"), end: make("div"),
+                   message: make("div"), dialog: make("div"), cross: make("button")};
+    sheet.setTitle = (text, sub) => {
+        sheet.title.textContent = String(text || "");
+        sheet.subtitle.textContent = String(sub || "");
+    };
+    sheet.say = (text, failure) => {
+        sheet.message.textContent = String(text || "");
+        sheet.message.failure = !!failure;
+    };
+    sheet.close = (reason) => {
+        if (sheet.closed) return false;
+        sheet.closed = true;
+        sheet.reason = reason;
+        if (spec.closed) spec.closed(reason);
+        return true;
+    };
+    sheet.request = (reason) => (spec.request ? spec.request(reason) : sheet.close(reason));
+    sheet.ask = (text) => {
+        asked.push(text);
+        return Promise.resolve(answers.length ? answers.shift() : "keep");
+    };
+    sheet.cross.addEventListener("click", () => sheet.request("close"));
+    sheet.setTitle(spec.title, spec.subtitle);
+    sheets.push(sheet);
+    return sheet;
+}
+window.mcSheet = {open: stubSheet, isOpen: () => sheets.some((sheet) => !sheet.closed)};
 const BUILT = "You are Ada. Stay in character as Ada.";
 const sent = [];
 const held = [];
@@ -540,9 +568,6 @@ const fake = {
     },
 };
 NS.store = () => fake;
-const asked = [];
-let agree = true;
-globalThis.confirm = (text) => { asked.push(text); return agree; };
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const editor = NS.systemEditor.editor();
 function type(text) {
@@ -708,38 +733,80 @@ class TestTheSystemPromptEditor:
         assert found["state"].startswith("Default for Ada")
         assert found["note"] == "Back to the default for Ada."
 
-    def test_typing_says_it_is_not_applied_yet(self):
+    def test_typing_says_it_is_not_saved_yet(self):
         found = run_editor("""
             editor.open("Ada");
             settle().then(() => {
                 type(BUILT + " More.");
-                const typed = [editor.controls.note.textContent, editor.dialog.dataset.dirty];
+                const dialog = editor.sheet.dialog;
+                const typed = [editor.controls.note.textContent, dialog.dataset.dirty,
+                               editor.controls.apply.classList.contains("mc-sheet-unsaved")];
                 type(BUILT);
-                const back = [editor.controls.note.textContent, editor.dialog.dataset.dirty];
+                const back = [editor.controls.note.textContent, dialog.dataset.dirty,
+                              editor.controls.apply.classList.contains("mc-sheet-unsaved")];
                 console.log(JSON.stringify({typed, back}));
             });
         """)
 
-        assert found["typed"] == ["Not applied yet.", "true"]
-        assert found["back"] == ["", "false"]
+        assert found["typed"] == ["Not saved yet.", "true", True]
+        assert found["back"] == ["", "false", False]
 
-    def test_close_with_an_unapplied_edit_asks_first(self):
+    def test_close_with_an_unsaved_edit_asks_first(self):
+        """The writers' editor's question: keep editing, discard or save."""
         found = run_editor("""
             editor.open("Ada");
             settle().then(() => {
                 type("Something new.");
-                agree = false;
-                press("close");
-                const kept = editor.isOpen();
-                agree = true;
-                press("close");
-                console.log(JSON.stringify({kept, closed: !editor.isOpen(), asked}));
+                answers = ["keep"];
+                const now = editor.close(false);
+                return settle().then(() => {
+                    const kept = editor.isOpen();
+                    answers = ["discard"];
+                    press("close");
+                    return settle().then(() => console.log(JSON.stringify(
+                        {now, kept, closed: !editor.isOpen(), asked,
+                         saved: sent.filter((entry) => entry.save).length})));
+                });
             });
         """)
 
+        assert found["now"] is False, "the question decides, not the press"
         assert found["kept"] is True
         assert found["closed"] is True
-        assert found["asked"] == ["Discard your changes to Ada’s system prompt?"] * 2
+        assert found["asked"] == ["Your change to Ada’s system prompt is not saved."] * 2
+        assert found["saved"] == 0, "discard sends nothing"
+
+    def test_save_in_answer_to_the_question_saves_and_then_closes(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type("Something new.");
+                answers = ["save"];
+                press("dismiss");
+                return settle().then(settle);
+            }).then(() => console.log(JSON.stringify(
+                {closed: !editor.isOpen(), saved: sent.filter((entry) => entry.save)})));
+        """)
+
+        assert found["closed"] is True
+        assert found["saved"] == [{"save": "Ada", "change": {"text": "Something new."}}]
+
+    def test_a_save_that_fails_in_answer_to_the_question_keeps_it_open(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type("Something new.");
+                answers = ["save"];
+                refuse = new Error("The disk is full.");
+                press("close");
+                return settle().then(settle);
+            }).then(() => console.log(JSON.stringify(
+                Object.assign(seen(), {text: editor.controls.text.value}))));
+        """)
+
+        assert found["open"] is True
+        assert found["text"] == "Something new.", "the edit is still there to save"
+        assert found["note"] == "The disk is full."
 
     def test_close_with_nothing_to_lose_does_not_ask(self):
         found = run_editor("""
@@ -752,32 +819,49 @@ class TestTheSystemPromptEditor:
 
         assert found == {"closed": True, "asked": []}
 
-    def test_escape_is_taken_over_so_it_can_ask(self):
+    def test_escape_and_the_edge_ask_too(self):
+        """Escape, a tap on the dimmed edge and the cross are the sheet's
+        `request`; the editor answers each with its own close, which asks."""
         found = run_editor("""
             editor.open("Ada");
             settle().then(() => {
                 type("Something new.");
-                agree = false;
-                let prevented = false;
-                editor.dialog.handlers.cancel.forEach((fn) => fn({preventDefault() { prevented = true; }}));
-                console.log(JSON.stringify({prevented, open: editor.isOpen(), asked: asked.length}));
+                const sheet = editor.sheet;
+                sheet.request("escape");
+                sheet.request("outside");
+                return settle().then(() => console.log(JSON.stringify(
+                    {open: editor.isOpen(), asked: asked.length, closed: sheet.closed})));
             });
         """)
 
-        assert found == {"prevented": True, "open": True, "asked": 1}
+        assert found == {"open": True, "asked": 2, "closed": False}
 
-    def test_reload_with_an_unapplied_edit_asks_before_reading_again(self):
+    def test_ctrl_enter_saves(self):
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                type("Be brief.");
+                editor.sheet.spec.submit();
+                return settle();
+            }).then(() => console.log(JSON.stringify(sent.filter((entry) => entry.save))));
+        """)
+
+        assert found == [{"save": "Ada", "change": {"text": "Be brief."}}]
+
+    def test_reload_with_an_unsaved_edit_asks_before_reading_again(self):
         found = run_editor("""
             editor.open("Ada");
             settle().then(() => {
                 type("Something new.");
-                agree = false;
+                answers = ["keep"];
                 press("reload");
-                const declined = sent.length;
-                agree = true;
-                press("reload");
-                return settle().then(() => console.log(JSON.stringify(
-                    {declined, accepted: sent.length, text: editor.controls.text.value})));
+                return settle().then(() => {
+                    const declined = sent.length;
+                    answers = ["discard"];
+                    press("reload");
+                    return settle().then(settle).then(() => console.log(JSON.stringify(
+                        {declined, accepted: sent.length, text: editor.controls.text.value})));
+                });
             });
         """)
 
@@ -826,46 +910,49 @@ class TestTheSystemPromptEditor:
         assert found["apply"] is False
         assert found["sent"] == []
 
-    def test_it_is_a_modal_dialog_that_focus_mode_leaves_alone(self):
-        """Focus mode hides what sits beside the focused workspace unless it
-        says it is a dialog, and a native <dialog> only implies it."""
+    def test_it_is_drawn_on_the_sheet_every_large_editor_shares(self):
+        """"These should look the same": the writers' system prompt editor's
+        pop-over, its foot in the same order. Whether that sheet is a dialog
+        focus mode spares, and whether it fills the glass a phone shows, is the
+        sheet's own (test_sheet_layout.py, in Chromium)."""
         found = run_editor("""
             editor.open("Ada");
-            const dialog = editor.dialog;
-            console.log(JSON.stringify({
-                modal: !!dialog.modal, role: dialog.getAttribute("role"),
-                ariaModal: dialog.getAttribute("aria-modal"),
-                inBody: document.body.children.includes(dialog)}));
+            const sheet = sheets[0];
+            const names = (half) => half.children.map((node) => node.textContent);
+            console.log(JSON.stringify({count: sheets.length, name: sheet.spec.name,
+                kind: sheet.spec.kind, start: names(sheet.start), end: names(sheet.end),
+                body: sheet.body.children.map((node) => node.tagName),
+                subtitle: sheet.subtitle.textContent}));
         """)
 
-        assert found == {"modal": True, "role": "dialog", "ariaModal": "true", "inBody": True}
+        assert found == {"count": 1, "name": "character-prompt", "kind": "system",
+                         "start": ["Restore default", "Reload"], "end": ["Close", "Save override"],
+                         "body": ["DIV", "TEXTAREA", "DIV"], "subtitle": "Character"}
 
-    def test_it_fills_what_is_on_the_screen(self):
-        """A phone whose page is wider than the screen widens the layout
-        viewport to the page, and a fixed dialog filled that: off the right
-        edge, its buttons below the fold. The visual viewport is the glass."""
+    def test_without_the_sheet_it_opens_nothing_and_says_nothing_broke(self):
         found = run_editor("""
-            const moved = {};
-            globalThis.visualViewport = {offsetLeft: 96, offsetTop: 0, width: 412, height: 915,
-                addEventListener(kind, fn) { moved[kind] = fn; },
-                removeEventListener(kind) { delete moved[kind]; }};
-            editor.open("Ada");
-            const style = editor.dialog.style;
-            const opened = [style.left, style.top, style.width, style.height];
-            // The keyboard comes up.
-            visualViewport.height = 480;
-            moved.resize();
-            const typing = style.height;
-            const following = Object.keys(moved).sort();
-            editor.close(true);
-            console.log(JSON.stringify({opened, typing, following,
-                                        after: Object.keys(moved)}));
+            delete window.mcSheet;
+            const opened = editor.open("Ada");
+            console.log(JSON.stringify({opened, open: editor.isOpen(), sent}));
         """)
 
-        assert found["opened"] == ["96px", "0px", "412px", "915px"]
-        assert found["typing"] == "480px"
-        assert found["following"] == ["resize", "scroll"]
-        assert found["after"] == [], "nothing is left listening once it is closed"
+        assert found == {"opened": False, "open": False, "sent": []}
+
+    def test_a_sheet_closed_from_outside_lets_the_editor_go_too(self):
+        """Mini Paint closes every sheet when its popup goes; the editor must
+        not think it is still open, or the next press is "already there"."""
+        found = run_editor("""
+            editor.open("Ada");
+            settle().then(() => {
+                sheets[0].close("close");
+                const after = editor.isOpen();
+                editor.open("Ada");
+                return settle().then(() => console.log(JSON.stringify(
+                    {after, sheets: sheets.length, reads: sent.length, open: editor.isOpen()})));
+            });
+        """)
+
+        assert found == {"after": False, "sheets": 2, "reads": 2, "open": True}
 
     def test_a_name_is_put_on_the_page_as_text(self):
         found = run_editor("""
@@ -1001,24 +1088,27 @@ class TestTheMenuOpensTheEditor:
         assert found == {"toggled": 0, "stopped": False}
 
 
-class TestTheEditorIsTheWholeWindow:
-    def test_nothing_sets_the_dialog_s_own_display(self):
-        """An author `display` beats the browser's `dialog:not([open])`, and a
-        closed editor would sit on the page. The column is the sheet's."""
-        assert "display" not in rule(".forge-assistant-system")
-        assert "display: flex" in rule(".forge-assistant-system-sheet")
+class TestTheEditorIsNinetyPercentOfTheWindow:
+    """Its rules are the shared sheet's (the mc-sheet section of style.css);
+    the measurements are test_sheet_layout.py's, in Chromium."""
 
-    def test_the_box_takes_what_the_rest_leaves(self):
-        text = rule(".forge-assistant-system-text")
+    def test_the_old_dialog_has_no_rules_left(self):
+        assert ".forge-assistant-system " not in CSS and ".forge-assistant-system{" not in CSS
+        assert ".forge-assistant-system-sheet" not in CSS
 
+    def test_the_sheet_is_a_column_and_the_box_takes_what_the_rest_leaves(self):
+        assert "display: flex" in rule(".mc-sheet")
+        text = rule(".mc-sheet .mc-sheet-text")
         assert "flex: 1 1 auto" in text
         assert "resize: none" in text
-        assert "max(16px" in text, "or a phone zooms the page when the box is tapped"
+
+    def test_a_phones_box_is_sixteen_pixels_or_it_zooms_the_page(self):
+        assert re.search(r"@media \(pointer: coarse\) \{\s*\.mc-sheet \.mc-sheet-text,\s*"
+                         r"\.mc-sheet \.mc-sheet-mono \{ font-size: 16px; \}", CSS)
 
     def test_it_is_sized_by_its_edges_and_not_by_the_viewport_width(self):
         """100vw reaches under the page's scrollbar, where the way out is."""
-        dialog = rule(".forge-assistant-system")
-
-        assert "inset: 0" in dialog
-        assert "100vw" not in dialog
-        assert "max-width: none" in dialog and "max-height: none" in dialog
+        sheet = rule(".mc-sheet")
+        for edge in ("top", "bottom", "left", "right"):
+            assert f"{edge}: var(--mc-sheet-inset)" in sheet
+        assert "100vw" not in sheet and "100vw" not in rule(".mc-sheet-layer")

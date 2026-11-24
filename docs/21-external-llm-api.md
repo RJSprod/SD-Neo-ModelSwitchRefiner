@@ -289,9 +289,48 @@ rather than conflicting:
 | `body @ extra` | `extra` is appended to the instructions — your override, if you gave one |
 | `body @@ replacement` | `replacement` replaces the instructions entirely, beating your override |
 
-`status()["system_override"]` records whether a request ran under its defaults.
-The override text itself is never logged, exactly as prompt text is never
-logged.
+`status()["system_override"]` records whether a request brought instructions of
+its own. The override text itself is never logged, exactly as prompt text is
+never logged.
+
+### 6.1 The instructions the user saved
+
+Since 2026-11-24 this extension also **keeps** instructions: the user's own, for
+any of the six sets (MiniMax's four, and LTX's two, §14.3), edited in its system
+prompt editor (`mcSheet.systemPrompt`, opened from LLM Studio's MiniMax
+workspace and from Mini Paint NEO's Clipboard tab and Send to WanGP popup).
+**A request that brings no `system_prompt` runs under them** — whoever sent it,
+the MiniMax workspace's own runs included — and under the default where none is
+saved. So the order is: the request's own `system_prompt`, then the saved
+instructions for its set, then the default; `@` and `@@` apply to whichever it
+is. They are read when the run starts, so an edit reaches a request already
+waiting in the queue.
+
+```python
+mc_llm_api.capabilities()["keeps_instructions"]         # True
+mc_llm_api.instructions("ref2va", has_image=True)
+# {"variant": "ref2va", "mode": "image", "text": "…what a request runs under now…",
+#  "source": "override",            # or "default"
+#  "default": "…the shipped text…", "label": "MiniMax H3 Ref2VA, with a picture"}
+mc_llm_api.save_instructions("ref2va", "…", has_image=True)    # answers as instructions()
+mc_llm_api.restore_instructions("ref2va", has_image=True)      # True when there were some
+mc_llm_api.adopt_instructions({"fl2va": {"image": "…"}, "ltx25": {"text": "…"}},
+                              origin="minipaint-clipboard")
+# {"adopted": 2, "kept": 0, "refused": 0}
+```
+
+Either LTX name is the LTX set; anything else is a MiniMax variant, as for
+`system_prompt`. `save_instructions` refuses blank text (`empty_system_prompt`;
+restore is how to go back) and text over 20,000 characters
+(`system_prompt_too_long`) — refused, never cut — and keeps no override for the
+shipped text saved unchanged. `adopt_instructions` is the one-time hand-over
+for a caller that kept its own before this extension did: a set already saved
+here is kept as it is, and so is one that is the default.
+
+**A caller that kept its own should stop sending them** once
+`keeps_instructions` is there, and hand them over once: Mini Paint NEO does
+both. One that goes on sending `system_prompt=` still wins for its requests,
+which is the user's saved instructions losing to a copy nobody can edit.
 
 
 ## 7. Feeds
@@ -389,6 +428,7 @@ mc_llm_api.capabilities()
 #  "configured": True,        # a language model is set up
 #  "vision": True,            # …and it can see pictures
 #  "model": "qwen3-vl-8b.gguf",
+#  "keeps_instructions": True, # the user's saved instructions apply (§6.1)
 #  "reason": ""}              # why not, when any of the three is False
 ```
 
@@ -572,7 +612,10 @@ reaches a terminal value and stays there until retention drops the record.
 | `prompt_master/minimax/` | The vendored WanGP instructions. |
 | `mc_llm_ltx.py` | The LTX 2.3 writer's instructions and calling convention (§14). |
 | `mc_llm_prompt_panel.py` | Prompt Studio, where an LTX 2.3 prompt is filed and loaded (§14.4). |
+| `mc_llm_instructions.py` | The instructions the user saved, and the hand-over (§6.1). |
+| `mc_llm_instructions_api.py`, `javascript/mc_sheet.js` | The system prompt editor's route, and the editor (§6.1). |
 | `tests/test_llm_external_api.py` | This document, executable. |
+| `tests/test_llm_instructions.py` | §6.1, executable. |
 
 `mc_llm_jobs` is not private, and reading it is fine — `mc_llm_jobs.feeds()`
 and the state constants are useful. But `mc_llm_api` is the part that carries
@@ -584,6 +627,15 @@ and the state constants are useful. But `mc_llm_api` is the part that carries
 Everything below is additive. `API_VERSION` is still `1`; a caller written
 against the first revision keeps working unchanged, and one that matches on
 refusal codes exhaustively should read the note under §3.
+
+**V1, fifth revision** — the instructions the user saved, kept here (2026-11-24):
+
+| Added | Where |
+|---|---|
+| A request without `system_prompt` runs under the saved instructions for its set, the MiniMax workspace's own runs too; the console says *under saved instructions* | §6.1 |
+| `instructions(variant, has_image=)`, `save_instructions(variant, text, has_image=)`, `restore_instructions(variant, has_image=)`, `adopt_instructions(sets, origin=)` | §6.1 |
+| `capabilities()["keeps_instructions"]` is `True` | §6.1, §8 |
+| Refusals `empty_system_prompt` and `system_prompt_too_long` from `save_instructions` | §6.1 |
 
 **V1, fourth revision** — LTX 2.5, under the LTX 2.3 writer's instructions:
 
@@ -697,7 +749,7 @@ mc_llm_api.system_prompt("ltx25", has_image=True) == mc_llm_api.system_prompt("l
 ```
 
 The pair is LTX 2.3's and LTX 2.5 runs under it too — one set of instructions,
-so a caller that keeps an override (Mini Paint does) keeps one for both.
+and one saved set of the user's for both (§6.1).
 
 They are written from Lightricks' LTX-2 prompt enhancer — the Gemma 3 pair
 LTX 2.3 runs (`gemma3_i2v_system_prompt.txt`, `gemma3_t2v_system_prompt.txt`)

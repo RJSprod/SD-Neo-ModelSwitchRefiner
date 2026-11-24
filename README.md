@@ -3342,7 +3342,7 @@ Chain already owns image residency, so it owns the LLM's too.
 | --- | --- |
 | **Prompt Studio** | LTX video-prompt generation. Text-to-video and image-to-video, a positive and a negative prompt as two separate outputs, the smart-negative second pass, and the full control set — style, motion, camera, transition, POV, wardrobe, accent and strength, dialogue budget, extra speech, music, duration, FPS, dimensions, output format, lexicon, extra negative terms and seed. |
 | **Conversation** | Threaded chat with persistent histories, and per-message actions. Characters are files in a `characters/` folder in the layout oobabooga uses, so cards import and export; chats are documents filed per character. |
-| **MiniMax H3** | The prompt enhancer, as its own workflow. FL2VA and REF2VA variants, an optional reference frame that is captioned first and shown to you, and its own history. |
+| **MiniMax H3** | The prompt enhancer, as its own workflow. FL2VA and REF2VA variants, an optional reference frame that is captioned first and shown to you, and its own history. **System prompt**, under the variant, opens the writers' instructions in the editor every door shares (*The writers' instructions are kept here*, below): what is saved there is what this workspace writes under. |
 | **Krea 2** | Krea 2 image prompts, written by the local model from Krea's own prompt expansion instruction. Text alone, or text plus up to four reference images numbered by the slot they sit in — each one described first, in order, so that "the woman from image 2" survives the trip into the finished prompt. [Creative Mode](#krea-creative-mode) and its ten art-direction axes, shared with txt2img. Writes prompts; generates no images. Its own history. |
 | **Setup** | The runtime, the [managed backbone catalogue](#managed-backbones), which GGUF runs, what context fits, and what is currently resident on the card. Everything here needs a file dialog, a download, an estimate or a table — the plain values live on the Settings page instead. |
 
@@ -3941,31 +3941,34 @@ character** removes it and its picture and lands you on whichever is left.
 
 #### The system prompt editor
 
-**⤢ System prompt** opens the character in *Talking to* on a page of its own:
-the whole window, most of it the prompt, in the shape of Mini Paint NEO's system
-prompt editor. The Forge Assistant's **⋯** menu opens the same editor
-(**System prompt…**). It opens on what the character is told now — its override
-if it has one, otherwise the prompt built from its Context and your persona —
-and the line under the box says which:
+**⤢ System prompt** opens the character in *Talking to* in the pop-over every
+large editor here shares (*The pop-over and the gear*, under *LoRA Viewer*): 90%
+of the window with the page dimmed round its edge, most of it the prompt, the
+cursor in it — the same sheet, with the same buttons in the same places, as the
+writers' system prompt editor. The Forge Assistant's **⋯** menu opens the same
+editor (**System prompt…**). It opens on what the character is told now — its
+override if it has one, otherwise the prompt built from its Context and your
+persona — and the line under the box says which:
 
-- **Default** for Ada, built from Ada's Context and your persona. Edit and
-  Apply override to replace it.
+- **Default** for Ada, built from Ada's Context and your persona. Edit it and
+  save an override to replace it.
 - **Override saved** for Ada. Restore default forgets it.
 
 | | |
 | --- | --- |
-| **Apply override** | Saves the box as the character's own system prompt. It is the override the character editor's box holds, so it is used wherever the character is talked to — here and in the Forge Assistant. |
+| **Save override** | Saves the box as the character's own system prompt (Ctrl+Enter too). It is the override the character editor's box holds, so it is used wherever the character is talked to — here and in the Forge Assistant. |
 | **Restore default** | Forgets the override. The character goes back to the built prompt. |
 | **Reload** | Reads the saved prompt again. |
-| **Close** | Puts the editor away; so do **×** and Escape. |
+| **Close** | Puts the editor away; so do the cross, a tap on the dimmed edge and Escape. |
 
-Applying the built prompt untouched keeps no override, and neither does applying
+Saving the built prompt untouched keeps no override, and neither does saving
 an empty box: the character goes on following its Context and your persona,
 which a frozen copy of today's prompt would silently stop doing. `{{char}}` and
-`{{user}}` work as they do in the override box. Close, Escape and Reload ask
-before an edit that has not been applied is thrown away, and nothing can be
-applied until the prompt has been read — an empty box applied would be
-*restore the default*. When the character editor above is open on the same
+`{{user}}` work as they do in the override box. Close, Escape, the edge and Reload ask
+before an edit that has not been saved is thrown away — **Keep editing**,
+**Discard** or **Save**, the writers' editor's question — and nothing can be
+saved until the prompt has been read: an empty box saved would be *restore the
+default*. When the character editor above is open on the same
 character, its override box is updated to match, so its **Save** does not put
 the old prompt back.
 
@@ -6244,6 +6247,23 @@ a caller writing hundreds of them should. Nothing else is written down: the
 records live in memory for fifteen minutes and are gone at a restart, and no
 picture is ever kept.
 
+**The writers' instructions are kept here.** The system prompts the MiniMax H3
+and LTX writers write under — six sets: FL2VA and Ref2VA, and the one LTX set
+for 2.3 and 2.5, each with a picture and without — are edited in one editor and
+kept in this extension (`writer-instructions.json` in the LLM data folder).
+Every request that brings no instructions of its own runs under what is saved
+there: the MiniMax workspace's own, Mini Paint NEO's Clipboard tab and Send to
+WanGP popup, any other caller. The editor opens from the workspace's **System
+prompt**, and from Mini Paint's two doors on the set their press would use; it
+is the pop-over every large editor shares, with **Writer** and **Instructions
+used** to move between the sets, **Save override**, **Restore default** and
+**Reload**, and an unsaved change asked about before it is thrown away. Saving
+the shipped text unchanged keeps no override. A caller's own `system_prompt`
+still wins for its one request, and `@` / `@@` in a prompt still add to or
+replace whichever applies. Until 2026-11-24 Mini Paint kept its own edits and
+sent them with its presses alone; it hands what it kept to this extension once,
+and an edit made here first is never overwritten by it.
+
 Only these two writers are exposed. Prompt Studio's own control-driven
 generation, Conversation and Krea 2 have no external surface. The API adds no web server, no port and no password — it is an
 import, usable only by code already running inside this WebUI. Turning LLM
@@ -8419,6 +8439,30 @@ when the UI Preset changes** (on).
     mixes.json             the mixes made on the Mix page
 ```
 
+## The pop-over and the gear
+
+Every large editor here is one pop-over (`javascript/mc_sheet.js`): 90% of the
+window with the page dimmed round its edge, sized to what the screen shows (a
+phone's keyboard makes it shorter, so its buttons stay above the keyboard), the
+cursor in its box. A second one opens over the first a little smaller, so the
+first shows round it; Escape, a tap on the dimmed edge and the cross are the top
+one's, and so are Tab (it goes round inside it) and Ctrl+Enter — which over
+Forge would otherwise press Generate behind it. The Forge Assistant's panel stays
+where it is under one.
+
+Four things are drawn on it: the gear's editor, below; the writers' system
+prompt editor (*The writers' instructions are kept here*, above); a character's
+system prompt editor (*The system prompt editor*, above); and Mini Paint NEO's
+Send to WanGP prompt editor, with its own **Enhance**.
+
+**The gear.** Txt2Img's and Img2Img's **Prompt** and **Negative prompt** have a
+small gear in their top right corner, clear of Forge's token counter and of the
+box's scroll bar, with room kept so no word sits under it. It opens the box's
+text in the pop-over; **Done** (or Escape, or the edge, or the cross) writes it
+back as typing would, **Cancel** leaves the box as it was. A tap into the box
+itself types there, as it always did. The gear works where the box is: on the
+page, or in the Forge Assistant's panel with the settings column docked.
+
 ## LoRA Viewer
 
 Every LoRA in the prompt, with its picture, its trigger words and a slider for
@@ -8674,6 +8718,8 @@ mc_llm_state.py       shared preferences + the mode histories
 mc_llm_sessions.py    the run orchestrations, as streaming generators
 mc_llm_slot_cache.py  a conversation's llama.cpp slot, saved to disk and read back after a restart
 mc_llm_template.py    Gemma 4's chat template with its thought marker kept on past replies
+mc_llm_instructions.py     the writers' system prompts as the user saved them, read by every run
+mc_llm_instructions_api.py the route the system prompt editor reads and writes them over
 mc_llm_studio.py      the LLM Studio tab shell, model chooser and Setup mode
 mc_llm_prompt_panel.py     Prompt Studio workspace
 mc_llm_chat_panel.py       Conversation workspace
@@ -8693,6 +8739,7 @@ mc_llm_conversation_startup.py  what all of that does once, at start-up
 mc_llm_attachment_staging.py    an uploaded picture, validated and held, with a
                       readiness that is a state rather than a timer
 mc_llm_overlays.py    one owner for all six of LLM Studio's pop surfaces
+javascript/mc_sheet.js        the pop-over every large editor opens, and the gear on Forge's prompt boxes
 mc_assistant_settings.py        the floating panel's settings, validated twice
 
 mc_voice_paths.py     where Voice Chat keeps its runtime, models, bank and clones
